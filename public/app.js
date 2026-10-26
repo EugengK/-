@@ -270,16 +270,16 @@ async function renderEntry(keepDate) {
         }
         if (g.id === null) anonymous.push(i);
       }
-      if (anonymous.length) {
-        const nums = anonymous.map((i) => `${i + 1}번째`).join(", ");
-        if (!confirm(`${nums} 줄에 성도 이름이 없습니다.\n\n무기명으로 저장할까요?\n(이름을 넣으려면 '취소'를 누르세요.)`)) {
-          lines[anonymous[0]].focusGiver();
-          return;
-        }
-      }
+      // One dialog: the totals, plus a clear warning line when some lines have no giver.
       const entries = filled.map((l) => l.value());
       const total = entries.reduce((s, e) => s + e.amount_cents, 0);
-      if (!confirm(`${date.value} 헌금 ${entries.length}건, 합계 ${money(total)}을 저장할까요?`)) return;
+      const warn = anonymous.length
+        ? `⚠️ ${anonymous.map((i) => `${i + 1}번째`).join(", ")} 줄은 성도 이름이 없어 무기명으로 저장됩니다.\n(이름을 넣으려면 '취소')\n\n`
+        : "";
+      if (!confirm(`${warn}${date.value} 헌금 ${entries.length}건, 합계 ${money(total)}을 저장할까요?`)) {
+        if (anonymous.length) lines[anonymous[0]].focusGiver();
+        return;
+      }
       await api("POST", "/api/offerings", { offering_date: date.value, entries, client_key: clientKey });
       toast(`${date.value} 헌금 저장: ${entries.length}건, ${money(total)}`);
       renderEntry(date.value);
