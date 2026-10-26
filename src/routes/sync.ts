@@ -78,15 +78,33 @@ syncRoutes.post("/", async (c) => {
     .prepare("SELECT id, member_code, name, family_code, relation FROM members WHERE member_code IS NOT NULL")
     .all<Existing>();
   const byCode = new Map(known.map((k) => [k.member_code, k]));
+  // People entered by hand before the sync existed: a sheet row with the same name may be them.
+  const { results: unlinked } = await db
+    .prepare("SELECT name FROM members WHERE member_code IS NULL")
+    .all<{ name: string }>();
+  const unlinkedNames = new Set(unlinked.map((u) => u.name));
   const today = todayInHobart();
 
   const statements: D1PreparedStatement[] = [];
   let created = 0;
   let updated = 0;
+  let pending = 0;
   for (const p of body.people) {
     const next = { name: p.name, family_code: p.family_code ?? null, relation: p.relation || null };
     const cur = byCode.get(p.member_code);
-    if (!cur) {
+    if (!cur && unlinkedNames.has(next.name)) {
+      // Don't guess: hold it for the pastor to link or create (see /api/registry/pending).
+      pending++;
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO sync_pending (member_code, family_code, name, relation, registered_on) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (member_code) DO UPDATE SET family_code = excluded.family_code, name = excluded.name,
+               relation = excluded.relation, registered_on = excluded.registered_on`,
+          )
+          .bind(p.member_code, next.family_code, next.name, next.relation, p.registered_on ?? null),
+      );
+    } else if (!cur) {
       created++;
       statements.push(
         db
@@ -108,5 +126,5 @@ syncRoutes.post("/", async (c) => {
     }
   }
   if (statements.length) await db.batch(statements);
-  return c.json({ created, updated, unchanged: body.people.length - created - updated });
+  return c.json({ created, updated, pending, unchanged: body.people.length - created - updated - pending });
 });

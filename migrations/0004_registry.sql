@@ -53,3 +53,21 @@ CREATE TABLE member_status_events (
   created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 CREATE INDEX member_status_member ON member_status_events (member_id, event_date);
+
+-- People added before the registry existed and already marked inactive keep that state:
+-- give them a 'left' event so the status history (which now drives is_active) agrees.
+INSERT INTO member_status_events (member_id, status_code, event_date, note, created_by)
+SELECT id, 'left', strftime('%Y-%m-%d', 'now'), '교적부 도입 전 비활성 처리됨', (SELECT id FROM users WHERE email = 'sheet-sync@system.local')
+FROM members WHERE is_active = 0;
+
+-- Sheet rows that look like someone already in the app (same name, not yet linked to a 교인ID).
+-- Held here until the pastor says "same person" (link) or "different person" (create).
+-- Only the same five sheet fields are stored.
+CREATE TABLE sync_pending (
+  member_code   TEXT PRIMARY KEY,
+  family_code   TEXT,
+  name          TEXT NOT NULL,
+  relation      TEXT,
+  registered_on TEXT,
+  seen_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);

@@ -42,7 +42,8 @@ function setupTriggers() {
 function onSheetChange() {
   // Several quick edits in a row would each fire; the lock makes them queue instead of overlap.
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(30000)) return;
+  // If another run is still going, wait for it: the next run then sends the latest sheet.
+  if (!lock.tryLock(120000)) return;
   try {
     sendToRegistry();
   } finally {
@@ -52,7 +53,10 @@ function onSheetChange() {
 
 function sendToRegistryWithAlert() {
   const r = sendToRegistry();
-  SpreadsheetApp.getUi().alert(`교적부 연동 완료\n새로 등록: ${r.created}명, 변경: ${r.updated}명, 그대로: ${r.unchanged}명`);
+  let msg = `교적부 연동 완료\n새로 등록: ${r.created}명, 변경: ${r.updated}명, 그대로: ${r.unchanged}명`;
+  if (r.pending) msg += `\n확인 필요: ${r.pending}명 (회계 프로그램 교적부 화면에서 '같은 분/새로 등록'을 골라 주세요)`;
+  if (r.skipped.length) msg += `\n\n보내지 못한 줄 (시트에서 고쳐 주세요):\n${r.skipped.join('\n')}`;
+  SpreadsheetApp.getUi().alert(msg);
 }
 
 /** Reads the five allowed columns and sends them. Returns totals. */
@@ -74,18 +78,31 @@ function sendToRegistry() {
 
   const first = header.indexOf(FIRST_REGISTERED);
   const people = [];
-  for (const row of values.slice(1)) {
+  const skipped = [];
+  values.slice(1).forEach((row, i) => {
     const code = String(row[col.member_code]).trim();
     const name = String(row[col.name]).trim();
-    if (!code || !name) continue;
+    if (!code && !name) return; // empty row
+    // Same rules as the server. One bad row is reported and skipped instead of stopping every sync.
+    const family = String(row[col.family_code]).trim();
+    const relation = String(row[col.relation]).trim();
+    const problem =
+      !/^[A-Za-z0-9-]{3,40}$/.test(code) ? '교인ID 형식' :
+      family && !/^[A-Za-z0-9-]{3,40}$/.test(family) ? '가정ID 형식' :
+      !name || name.length > 50 ? '이름' :
+      relation.length > 20 ? '관계' : '';
+    if (problem) {
+      skipped.push(`${i + 2}행 (${problem})`);
+      return;
+    }
     people.push({
       member_code: code,
-      family_code: String(row[col.family_code]).trim() || null,
+      family_code: family || null,
       name: name,
-      relation: String(row[col.relation]).trim() || null,
+      relation: relation || null,
       registered_on: (first >= 0 && toDate(row[first])) || toDate(row[col.registered_at]),
     });
-  }
+  });
 
   const headers = { Authorization: `Bearer ${token}` };
   const id = props.getProperty('CF_ACCESS_CLIENT_ID');
@@ -95,7 +112,7 @@ function sendToRegistry() {
     headers['CF-Access-Client-Secret'] = secret;
   }
 
-  const total = { created: 0, updated: 0, unchanged: 0 };
+  const total = { created: 0, updated: 0, pending: 0, unchanged: 0, skipped: skipped };
   for (let i = 0; i < people.length; i += CHUNK) {
     const res = UrlFetchApp.fetch(url, {
       method: 'post',
@@ -103,6 +120,7 @@ function sendToRegistry() {
       headers: headers,
       payload: JSON.stringify({ people: people.slice(i, i + CHUNK) }),
       muteHttpExceptions: true,
+      followRedirects: false, // never hand the token to a redirect target
     });
     if (res.getResponseCode() !== 200) {
       throw new Error(`교적부 연동 실패 (${res.getResponseCode()}): ${res.getContentText().slice(0, 300)}`);
@@ -110,6 +128,7 @@ function sendToRegistry() {
     const r = JSON.parse(res.getContentText());
     total.created += r.created;
     total.updated += r.updated;
+    total.pending += r.pending || 0;
     total.unchanged += r.unchanged;
   }
   return total;

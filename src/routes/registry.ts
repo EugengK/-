@@ -191,7 +191,12 @@ registryRoutes.post("/member-titles/:id{[0-9]+}/void", async (c) => {
 
 // ---------- 출석 상태 이력 ----------
 
-const statusSchema = z.object({ status_code: z.enum(STATUS_CODES), event_date: isoDate, note: optionalText(300) }).strict();
+// Future dates are refused: the current status (and who appears in the giver list) is the latest
+// event, so a change recorded ahead of time would take effect immediately.
+const statusSchema = z
+  .object({ status_code: z.enum(STATUS_CODES), event_date: isoDate, note: optionalText(300) })
+  .strict()
+  .refine((v) => v.event_date <= todayInHobart(), { message: "앞으로의 날짜는 기록할 수 없습니다. 그날이 되면 기록하세요.", path: ["event_date"] });
 
 registryRoutes.post("/members/:id{[0-9]+}/status", async (c) => {
   const memberId = Number(c.req.param("id"));
@@ -246,3 +251,86 @@ registryRoutes.get("/expiring", async (c) => {
   return c.json(results.map((r) => ({ ...r, is_active: r.is_active === 1 })));
 });
 
+
+// ---------- 시트 연동 확인 대기 ----------
+
+interface PendingRow {
+  member_code: string;
+  family_code: string | null;
+  name: string;
+  relation: string | null;
+  registered_on: string | null;
+  seen_at: string;
+}
+
+/** Sheet rows held back because someone with the same name was already entered by hand. */
+registryRoutes.get("/pending", async (c) => {
+  const db = c.env.DB;
+  const [pending, candidates] = await db.batch([
+    db.prepare("SELECT member_code, family_code, name, relation, registered_on, seen_at FROM sync_pending ORDER BY seen_at, member_code"),
+    db.prepare("SELECT id, name, relation, note, registered_on FROM members WHERE member_code IS NULL ORDER BY id"),
+  ]);
+  const cands = candidates!.results as { id: number; name: string }[];
+  return c.json(
+    (pending!.results as unknown as PendingRow[]).map((p) => ({ ...p, candidates: cands.filter((m) => m.name === p.name) })),
+  );
+});
+
+async function takePending(c: { env: AppEnv["Bindings"] }, code: string): Promise<PendingRow> {
+  const row = await c.env.DB.prepare("SELECT * FROM sync_pending WHERE member_code = ?").bind(code).first<PendingRow>();
+  if (!row) throw new HTTPException(404, { message: "확인 대기 항목이 없습니다. 새로고침하세요." });
+  return row;
+}
+
+const CODE = "/pending/:code{[A-Za-z0-9-]{3,40}}";
+
+/** "Same person": give the hand-entered member the sheet's 교인ID (keeps their giving history together). */
+registryRoutes.post(`${CODE}/link`, async (c) => {
+  const p = await takePending(c, c.req.param("code"));
+  const body = await parseBody(c, z.object({ member_id: z.number().int().positive() }).strict());
+  const db = c.env.DB;
+  const before = await db
+    .prepare("SELECT id, name, member_code, family_code, relation FROM members WHERE id = ?")
+    .bind(body.member_id)
+    .first<Record<string, unknown>>();
+  if (!before) throw new HTTPException(404, { message: "찾을 수 없습니다." });
+  if (before.member_code !== null) throw new HTTPException(409, { message: "이미 다른 교인ID와 연결된 분입니다." });
+  const after = { member_code: p.member_code, family_code: p.family_code, relation: p.relation ?? before.relation };
+  const [u] = await db.batch([
+    db
+      .prepare("UPDATE members SET member_code = ?, family_code = ?, relation = ? WHERE id = ? AND member_code IS NULL")
+      .bind(after.member_code, after.family_code, after.relation, body.member_id),
+    auditStatement(db, c.get("user"), "update", "members", body.member_id, before, after, true),
+    // changes() here is the audit insert, which only happened if the link above did.
+    db.prepare("DELETE FROM sync_pending WHERE member_code = ? AND changes() > 0").bind(p.member_code),
+  ]);
+  if (u!.meta.changes === 0) throw new HTTPException(409, { message: "이미 다른 교인ID와 연결된 분입니다." });
+  return c.json({ ok: true });
+});
+
+/** "Different person": register the sheet row as a new member. */
+registryRoutes.post(`${CODE}/create`, async (c) => {
+  const p = await takePending(c, c.req.param("code"));
+  const db = c.env.DB;
+  const user = c.get("user");
+  const date = p.registered_on ?? todayInHobart();
+  const row = { member_code: p.member_code, name: p.name, family_code: p.family_code, relation: p.relation };
+  try {
+    await db.batch([
+      db
+        .prepare("INSERT INTO members (name, member_code, family_code, relation, registered_on) VALUES (?, ?, ?, ?, ?)")
+        .bind(p.name, p.member_code, p.family_code, p.relation, date),
+      auditStatement(db, user, "create", "members", "last_insert", undefined, row),
+      db
+        .prepare(
+          "INSERT INTO member_status_events (member_id, status_code, event_date, note, created_by) SELECT id, 'registered', ?, '목양 시트에서 등록', ? FROM members WHERE member_code = ?",
+        )
+        .bind(date, user.id, p.member_code),
+      db.prepare("DELETE FROM sync_pending WHERE member_code = ?").bind(p.member_code),
+    ]);
+  } catch (err) {
+    if (isUniqueViolation(err)) throw new HTTPException(409, { message: "이미 등록된 교인ID입니다." });
+    throw err;
+  }
+  return c.json({ ok: true }, 201);
+});

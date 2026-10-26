@@ -402,7 +402,8 @@ const isRegistryAdmin = () => state.me?.registry_admin === true;
 const statusTag = (code) =>
   code ? h("span", { class: `tag ${LEFT_CODES.has(code) ? "void" : ""}` }, STATUS_LABELS[code] ?? code) : null;
 const titleTag = (t) => (t ? h("span", { class: "tag online" }, t) : null);
-const thisYear = () => String(new Date().getFullYear());
+// The church's year, not the phone's (they differ only when travelling, but it costs nothing).
+const thisYear = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Hobart", year: "numeric" }).format(new Date());
 
 async function renderRegistry() {
   const ticket = newTicket();
@@ -466,8 +467,36 @@ async function renderRegistry() {
     );
   };
 
+  // Pastor only: sheet rows held back because someone with the same name was entered by hand.
+  const pending = h("div");
+  const loadPending = async () => {
+    if (!isRegistryAdmin()) return;
+    const rows = await api("GET", "/api/registry/pending");
+    pending.replaceChildren(
+      ...(rows.length
+        ? [h("div", { class: "card" },
+            h("h3", {}, `시트에서 온 분 확인 필요 (${rows.length}명)`),
+            h("p", { class: "muted" }, "이미 직접 등록된 같은 이름의 분이 있습니다. 같은 분이면 '같은 분'을, 다른 분이면 '새로 등록'을 누르세요. 같은 분으로 연결하면 지난 헌금 기록이 그대로 이어집니다."),
+            h("ul", { class: "list" }, rows.map((p) =>
+              h("li", { style: "flex-wrap:wrap" },
+                h("div", { class: "grow" }, h("b", {}, p.name), " ", h("span", { class: "muted" }, [p.relation, p.member_code].filter(Boolean).join(" · "))),
+                h("div", { class: "row shrink" },
+                  ...p.candidates.map((cand) =>
+                    h("button", { type: "button", class: "secondary small", onclick: (e) => {
+                      if (!confirm(`시트의 '${p.name}'(${p.member_code})을(를) 이미 등록된 '${cand.name}'${cand.note ? `(${cand.note})` : ""}과(와) 같은 분으로 연결할까요?`)) return;
+                      act(e.currentTarget, async () => { await api("POST", `/api/registry/pending/${p.member_code}/link`, { member_id: cand.id }); toast("연결했습니다."); await Promise.all([load(), loadPending()]); });
+                    } }, `같은 분${p.candidates.length > 1 ? ` (#${cand.id}${cand.note ? ` ${cand.note}` : ""})` : ""}`)),
+                  h("button", { type: "button", class: "small", onclick: (e) => {
+                    if (!confirm(`'${p.name}'을(를) 다른 분으로 새로 등록할까요?`)) return;
+                    act(e.currentTarget, async () => { await api("POST", `/api/registry/pending/${p.member_code}/create`, {}); toast("새로 등록했습니다."); await Promise.all([load(), loadPending()]); });
+                  } }, "새로 등록"))))))]
+        : []),
+    );
+  };
+
   paint(ticket,
     h("h2", {}, "교적부"),
+    pending,
     h("p", { class: "muted" }, "새가족은 목양 시트에서 자동으로 들어옵니다. 직분과 출석 상태는 여기에서 관리합니다."),
     expiring,
     h("div", { class: "card" },
@@ -476,7 +505,7 @@ async function renderRegistry() {
       list),
     h("div", { class: "card registry-only" }, h("h3", {}, "직접 추가 (시트에 없는 분)"), h("div", { class: "grid" }, name, relation, note, add)),
   );
-  await act(null, () => Promise.all([load(), loadExpiring()]));
+  await act(null, () => Promise.all([load(), loadExpiring(), loadPending()]));
 }
 
 async function renderRegistryMember(ticket, id) {
@@ -514,7 +543,7 @@ async function renderRegistryMember(ticket, id) {
 
   // 상태 추가
   const sSel = h("select", { "aria-label": "상태" }, Object.entries(STATUS_LABELS).filter(([k]) => k !== "registered").map(([k, v]) => h("option", { value: k }, v)));
-  const sDate = h("input", { type: "date", value: ymd(new Date()), "aria-label": "날짜" });
+  const sDate = h("input", { type: "date", value: ymd(new Date()), max: ymd(new Date()), "aria-label": "날짜" });
   const sNote = h("input", { placeholder: "메모 (선택)", maxlength: 300 });
   const sAdd = h("button", { type: "button" }, "상태 기록");
   sAdd.onclick = () =>

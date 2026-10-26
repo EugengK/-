@@ -169,16 +169,16 @@ describe("sheet sync", () => {
 
   it("adds new people as registered, then only updates what changed", async () => {
     const r1 = await sync({ people: [person("P-1", "윤영자"), person("P-2", "정경남", { relation: "배우자" })] });
-    expect(await json(r1)).toEqual({ created: 2, updated: 0, unchanged: 0 });
+    expect(await json(r1)).toEqual({ created: 2, updated: 0, pending: 0, unchanged: 0 });
     const rows = await db.prepare("SELECT name, member_code, family_code, relation, registered_on, is_active FROM members ORDER BY member_code").all();
     expect(rows.results[0]).toMatchObject({ name: "윤영자", member_code: "P-1", family_code: "F-1", relation: "본인", registered_on: "2026-08-09", is_active: 1 });
     expect(await count("SELECT COUNT(*) AS n FROM member_status_events WHERE status_code = 'registered' AND event_date = '2026-08-09'")).toBe(2);
     expect(await count("SELECT COUNT(*) AS n FROM audit_log WHERE user_email = 'sheet-sync@system.local' AND action = 'create'")).toBe(2);
 
     const r2 = await sync({ people: [person("P-1", "윤영자"), person("P-2", "정경남 ", { relation: "배우자" })] });
-    expect(await json(r2)).toEqual({ created: 0, updated: 0, unchanged: 2 });
+    expect(await json(r2)).toEqual({ created: 0, updated: 0, pending: 0, unchanged: 2 });
     const r3 = await sync({ people: [person("P-1", "윤영자B")] });
-    expect(await json(r3)).toEqual({ created: 0, updated: 1, unchanged: 0 });
+    expect(await json(r3)).toEqual({ created: 0, updated: 1, pending: 0, unchanged: 0 });
     expect(await count("SELECT COUNT(*) AS n FROM members WHERE name = '윤영자B'")).toBe(1);
   });
 
@@ -211,9 +211,60 @@ describe("sheet sync", () => {
 
   it("handles full batches of 100 new people, and a second batch with 100 already known", async () => {
     const batch = (from: number) => Array.from({ length: 100 }, (_, i) => person(`P-${from + i}`, `사람${from + i}`));
-    expect(await json(await sync({ people: batch(0) }))).toEqual({ created: 100, updated: 0, unchanged: 0 });
-    expect(await json(await sync({ people: batch(100) }))).toEqual({ created: 100, updated: 0, unchanged: 0 });
-    expect(await json(await sync({ people: batch(50) }))).toEqual({ created: 0, updated: 0, unchanged: 100 });
+    expect(await json(await sync({ people: batch(0) }))).toEqual({ created: 100, updated: 0, pending: 0, unchanged: 0 });
+    expect(await json(await sync({ people: batch(100) }))).toEqual({ created: 100, updated: 0, pending: 0, unchanged: 0 });
+    expect(await json(await sync({ people: batch(50) }))).toEqual({ created: 0, updated: 0, pending: 0, unchanged: 100 });
     expect(await count("SELECT COUNT(*) AS n FROM member_status_events")).toBe(200);
+  });
+});
+
+describe("review fixes: no duplicates on first sync, history consistency", () => {
+  beforeEach(resetDb);
+
+  it("holds a sheet person whose name matches a hand-entered member, until the pastor decides", async () => {
+    const old = await newMember("김철수"); // entered by hand before the sync, may have giving history
+    const r = await json(await sync({ people: [person("P-1", "김철수"), person("P-2", "이영희")] }));
+    expect(r).toEqual({ created: 1, updated: 0, pending: 1, unchanged: 0 });
+    expect(await count("SELECT COUNT(*) AS n FROM members WHERE name = '김철수'")).toBe(1);
+    // Re-sending keeps it pending (no duplicate either way).
+    expect(await json(await sync({ people: [person("P-1", "김철수")] }))).toMatchObject({ pending: 1, created: 0 });
+
+    const pend = await json(await call("GET", "/api/registry/pending", { as: PASTOR }));
+    expect(pend).toHaveLength(1);
+    expect(pend[0].candidates.map((c: any) => c.id)).toEqual([old.id]);
+
+    expect((await call("POST", "/api/registry/pending/P-1/link", { as: EDITOR, body: { member_id: old.id } })).status).toBe(403);
+    expect((await call("POST", "/api/registry/pending/P-1/link", { as: PASTOR, body: { member_id: old.id } })).status).toBe(200);
+    expect(await json(await call("GET", "/api/registry/pending", { as: PASTOR }))).toHaveLength(0);
+    const linked = await db.prepare("SELECT member_code, family_code FROM members WHERE id = ?").bind(old.id).first<any>();
+    expect(linked).toEqual({ member_code: "P-1", family_code: "F-1" });
+    // From now on the sheet updates the same record.
+    expect(await json(await sync({ people: [person("P-1", "김철수")] }))).toMatchObject({ unchanged: 1, pending: 0 });
+    expect((await call("POST", "/api/registry/pending/P-1/link", { as: PASTOR, body: { member_id: old.id } })).status).toBe(404);
+  });
+
+  it("'different person' creates a new member from the pending row", async () => {
+    await newMember("박");
+    await sync({ people: [person("P-7", "박")] });
+    expect((await call("POST", "/api/registry/pending/P-7/create", { as: PASTOR, body: {} })).status).toBe(201);
+    expect(await count("SELECT COUNT(*) AS n FROM members WHERE name = '박'")).toBe(2);
+    expect(await count("SELECT COUNT(*) AS n FROM member_status_events e JOIN members m ON m.id = e.member_id WHERE m.member_code = 'P-7' AND e.status_code = 'registered'")).toBe(1);
+    expect(await count("SELECT COUNT(*) AS n FROM sync_pending")).toBe(0);
+  });
+
+  it("cannot link to someone already linked", async () => {
+    await sync({ people: [person("P-1", "최")] });
+    const linkedOne = (await json(await call("GET", "/api/members", { as: EDITOR })))[0];
+    await newMember("최");
+    await sync({ people: [person("P-2", "최")] });
+    expect((await call("POST", "/api/registry/pending/P-2/link", { as: PASTOR, body: { member_id: linkedOne.id } })).status).toBe(409);
+    expect(await count("SELECT COUNT(*) AS n FROM sync_pending")).toBe(1);
+  });
+
+  it("refuses future-dated status events", async () => {
+    const m = await newMember("미래");
+    const r = await call("POST", `/api/registry/members/${m.id}/status`, { as: PASTOR, body: { status_code: "transferred", event_date: "2099-01-01" } });
+    expect(r.status).toBe(400);
+    expect((await json(await call("GET", "/api/members", { as: EDITOR }))).some((x: any) => x.id === m.id)).toBe(true);
   });
 });
