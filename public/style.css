@@ -8,7 +8,7 @@ html, body { margin: 0; background: var(--bg); color: var(--text);
   font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif; }
 .top { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between;
   gap: 8px; padding: 12px 16px; background: var(--brand); color: #fff; }
-.top h1 { margin: 0; font-size: 18px; }
+.top h1 { margin: 0; font-size: 18px; white-space: nowrap; }
 .who { font-size: 13px; opacity: .9; text-align: right; }
 main { max-width: 760px; margin: 0 auto; padding: 16px 16px 96px; }
 .tabs { position: fixed; bottom: 0; left: 0; right: 0; display: flex; background: var(--card);
@@ -58,5 +58,6 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
   border-radius: 10px; background: #1d2330; color: #fff; z-index: 5; box-shadow: 0 6px 20px rgba(0,0,0,.2); }
 .toast.error { background: var(--danger); }
 .viewer .editor-only { display: none !important; }
+.no-registry .registry-only { display: none !important; }
 .notice { padding: 10px 12px; border-radius: 8px; background: #fff8e6; border: 1px solid #f1dfae; font-size: 14px; margin-bottom: 12px; }
 .mt { margin-top: 10px; }

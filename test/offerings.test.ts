@@ -5,42 +5,46 @@ const count = async (sql: string, ...b: unknown[]) =>
   (await db.prepare(sql).bind(...b).first<{ n: number }>())!.n;
 
 async function member(name: string, extra: Record<string, unknown> = {}) {
-  return json(await call("POST", "/api/members", { as: EDITOR, body: { name, ...extra } }));
+  return json(await call("POST", "/api/members", { as: PASTOR, body: { name, ...extra } }));
 }
 
 describe("members", () => {
   beforeEach(resetDb);
 
-  it("creates, searches, updates and deactivates; duplicates allowed; audited", async () => {
+  it("creates, searches and updates; duplicates allowed; audited; new people start as registered", async () => {
     const a = await member("김철수", { phone: " 0400 000 000 ", note: "" });
     expect(a).toMatchObject({ name: "김철수", phone: "0400 000 000", note: null, is_active: true });
     await member("김철수", { note: "청년부" }); // same name, different person
     await member("이영희");
 
-    expect(await json(await call("GET", "/api/members?q=철수", { as: PASTOR }))).toHaveLength(2);
-    expect(await json(await call("GET", "/api/members?q=%25", { as: PASTOR }))).toHaveLength(0); // literal %
+    const found = await json(await call("GET", "/api/members?q=철수", { as: EDITOR }));
+    expect(found).toHaveLength(2);
+    expect(found[0].current_status).toBe("registered");
+    expect(await json(await call("GET", "/api/members?q=%25", { as: EDITOR }))).toHaveLength(0); // literal %
 
-    const upd = await call("PATCH", `/api/members/${a.id}`, { as: EDITOR2, body: { phone: null, is_active: false } });
+    const upd = await call("PATCH", `/api/members/${a.id}`, { as: PASTOR, body: { phone: null } });
     expect(upd.status).toBe(200);
-    expect(await json(upd)).toMatchObject({ phone: null, is_active: false });
-    expect(await json(await call("GET", "/api/members", { as: PASTOR }))).toHaveLength(2);
-    expect(await json(await call("GET", "/api/members?include_inactive=1", { as: PASTOR }))).toHaveLength(3);
+    expect(await json(upd)).toMatchObject({ phone: null });
     expect(await count("SELECT COUNT(*) AS n FROM audit_log WHERE table_name = 'members'")).toBe(4);
   });
 
-  it("validates and blocks viewers", async () => {
+  it("validates; only the registry admin may change people", async () => {
     for (const body of [{}, { name: "" }, { name: "a", phone: "1".repeat(31) }, { name: "a", age: 3 }]) {
-      expect((await call("POST", "/api/members", { as: EDITOR, body })).status).toBe(400);
+      expect((await call("POST", "/api/members", { as: PASTOR, body })).status).toBe(400);
     }
-    expect((await call("POST", "/api/members", { as: PASTOR, body: { name: "x" } })).status).toBe(403);
-    expect((await call("PATCH", "/api/members/99999", { as: EDITOR, body: { name: "x" } })).status).toBe(404);
+    expect((await call("POST", "/api/members", { as: EDITOR, body: { name: "x" } })).status).toBe(403);
+    const m = await member("y");
+    expect((await call("PATCH", `/api/members/${m.id}`, { as: EDITOR2, body: { name: "z" } })).status).toBe(403);
+    expect((await call("PATCH", "/api/members/99999", { as: PASTOR, body: { name: "x" } })).status).toBe(404);
+    // attendance is not edited directly any more
+    expect((await call("PATCH", `/api/members/${m.id}`, { as: PASTOR, body: { is_active: false } })).status).toBe(400);
   });
 
   it("a stale concurrent edit gets 409 and no audit row", async () => {
     const m = await member("박");
     const [x, y] = await Promise.all([
-      call("PATCH", `/api/members/${m.id}`, { as: EDITOR, body: { name: "박1" } }),
-      call("PATCH", `/api/members/${m.id}`, { as: EDITOR2, body: { note: "메모" } }),
+      call("PATCH", `/api/members/${m.id}`, { as: PASTOR, body: { name: "박1" } }),
+      call("PATCH", `/api/members/${m.id}`, { as: PASTOR, body: { note: "메모" } }),
     ]);
     const ok = [x, y].filter((r) => r.status === 200).length;
     expect(await count("SELECT COUNT(*) AS n FROM audit_log WHERE action='update' AND row_id = ?", m.id)).toBe(ok);
@@ -203,17 +207,17 @@ describe("phase 2 review fixes", () => {
   it("refuses a member edit made from a stale screen", async () => {
     const m = await member("최", { phone: "111" });
     // Editor 2 changes the phone.
-    await call("PATCH", `/api/members/${m.id}`, { as: EDITOR2, body: { phone: "222", expected: { phone: "111" } } });
-    // Editor 1 still sees phone 111 and edits the note.
+    await call("PATCH", `/api/members/${m.id}`, { as: PASTOR, body: { phone: "222", expected: { phone: "111" } } });
+    // A second, stale screen still shows phone 111 and edits the note.
     const stale = await call("PATCH", `/api/members/${m.id}`, {
-      as: EDITOR,
+      as: PASTOR,
       body: { note: "메모", expected: { name: "최", phone: "111", note: null } },
     });
     expect(stale.status).toBe(409);
     const row = await db.prepare("SELECT phone, note FROM members WHERE id = ?").bind(m.id).first<any>();
     expect(row).toEqual({ phone: "222", note: null });
-    expect((await call("PATCH", `/api/members/${m.id}`, { as: EDITOR, body: { expected: { phone: "222" } } })).status).toBe(400);
-    expect((await call("PATCH", `/api/members/${m.id}`, { as: EDITOR, body: { note: "x", expected: { bogus: 1 } } })).status).toBe(400);
+    expect((await call("PATCH", `/api/members/${m.id}`, { as: PASTOR, body: { expected: { phone: "222" } } })).status).toBe(400);
+    expect((await call("PATCH", `/api/members/${m.id}`, { as: PASTOR, body: { note: "x", expected: { bogus: 1 } } })).status).toBe(400);
   });
 
   it("member search ignores ASCII case", async () => {
@@ -221,10 +225,10 @@ describe("phase 2 review fixes", () => {
     expect(await json(await call("GET", "/api/members?q=john", { as: PASTOR }))).toHaveLength(1);
   });
 
-  it("viewers cannot post offerings or edit members", async () => {
+  it("the pastor cannot post offerings; finance editors cannot edit members", async () => {
     const m = await member("정");
     expect((await call("POST", "/api/offerings", { as: PASTOR, body: { offering_date: "2026-11-01", entries: [line] } })).status).toBe(403);
-    expect((await call("PATCH", `/api/members/${m.id}`, { as: PASTOR, body: { name: "x" } })).status).toBe(403);
+    expect((await call("PATCH", `/api/members/${m.id}`, { as: EDITOR, body: { name: "x" } })).status).toBe(403);
   });
 
   it("summary filtered by fund type still counts a type that was later stopped", async () => {

@@ -60,13 +60,13 @@ export function authenticate(verify: TokenVerifier): MiddlewareHandler<AppEnv> {
       email = await verify(token, c.env);
       if (!email) return c.json({ error: "로그인이 필요합니다." }, 401);
     }
-    const user = await c.env.DB.prepare(
-      "SELECT id, email, name, role FROM users WHERE email = ? AND is_active = 1",
+    const row = await c.env.DB.prepare(
+      "SELECT id, email, name, role, registry_admin FROM users WHERE email = ? AND is_active = 1",
     )
       .bind(email)
-      .first<AppUser>();
-    if (!user) return c.json({ error: "이 계정은 사용 권한이 없습니다." }, 403);
-    c.set("user", user);
+      .first<Omit<AppUser, "registry_admin"> & { registry_admin: number }>();
+    if (!row) return c.json({ error: "이 계정은 사용 권한이 없습니다." }, 403);
+    c.set("user", { ...row, registry_admin: row.registry_admin === 1 });
     await next();
   };
 }
@@ -81,15 +81,23 @@ function isSameHost(origin: string, requestUrl: string): boolean {
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
+/** Registry (교적부) writes belong to the pastor; everything else is finance and belongs to editors. */
+function mayWrite(user: AppUser, path: string): boolean {
+  if (path.startsWith("/api/registry/") || path === "/api/registry" || path.startsWith("/api/members")) {
+    return user.registry_admin;
+  }
+  return user.role === "editor";
+}
+
 /**
- * Default-deny for writes: any non-read request needs the editor role, a same-origin
+ * Default-deny for writes: any non-read request needs the right permission for its area, a same-origin
  * Origin (if the browser sent one) and a JSON body. The last two close the CSRF gap
  * that cookie-based Access login would otherwise leave open.
  */
 export const guardWrites: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (SAFE_METHODS.has(c.req.method)) return next();
 
-  if (c.get("user").role !== "editor") {
+  if (!mayWrite(c.get("user"), c.req.path)) {
     return c.json({ error: "수정 권한이 없습니다." }, 403);
   }
   const origin = c.req.header("Origin");

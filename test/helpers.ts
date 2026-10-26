@@ -18,6 +18,8 @@ export async function resetDb() {
   // Child tables first. Seeded fund_types (ids 1-6) and settings are kept.
   for (const t of [
     "audit_log",
+    "member_titles",
+    "member_status_events",
     "expense_items",
     "expenses",
     "offerings",
@@ -33,10 +35,14 @@ export async function resetDb() {
   }
   await db.prepare("DELETE FROM fund_types WHERE id > 6").run();
   await db.prepare("UPDATE fund_types SET is_active = 1").run();
+  await db.prepare("DELETE FROM titles WHERE id > 6").run();
+  await db.prepare("UPDATE titles SET is_active = 1").run();
   await db.batch([
     db.prepare("INSERT INTO users (email, name, role) VALUES (?, ?, 'editor')").bind(EDITOR, "기록1"),
     db.prepare("INSERT INTO users (email, name, role) VALUES (?, ?, 'editor')").bind(EDITOR2, "기록2"),
-    db.prepare("INSERT INTO users (email, name, role) VALUES (?, ?, 'viewer')").bind(PASTOR, "담임목사"),
+    // The pastor reads the finances and manages the registry.
+    db.prepare("INSERT INTO users (email, name, role, registry_admin) VALUES (?, ?, 'viewer', 1)").bind(PASTOR, "담임목사"),
+    db.prepare("INSERT INTO users (email, name, role, is_active) VALUES ('sheet-sync@system.local', '목양 시트 자동 연동', 'viewer', 0)"),
   ]);
 }
 

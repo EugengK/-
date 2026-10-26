@@ -6,6 +6,8 @@ import { auditRoutes, meRoutes, settingsRoutes, userRoutes } from "./routes/misc
 import { memberRoutes } from "./routes/members";
 import { offeringRoutes } from "./routes/offerings";
 import { openingBalanceRoutes } from "./routes/openingBalances";
+import { registryRoutes } from "./routes/registry";
+import { syncRoutes } from "./routes/sync";
 import type { AppEnv, TokenVerifier } from "./types";
 
 /** `verify` is injectable so tests can stand in for Cloudflare Access; production uses the default. */
@@ -14,6 +16,9 @@ export function createApp(verify: TokenVerifier = accessVerifier) {
 
   // Open on purpose: no data, used for uptime checks.
   app.get("/api/health", (c) => c.json({ ok: true }));
+
+  // The pastor's sheet script authenticates with its own token, not a user login.
+  app.route("/api/registry/sync", syncRoutes);
 
   app.use("/api/*", authenticate(verify));
   app.use("/api/*", guardWrites);
@@ -28,6 +33,7 @@ export function createApp(verify: TokenVerifier = accessVerifier) {
   app.route("/api/opening-balances", openingBalanceRoutes);
   app.route("/api/members", memberRoutes);
   app.route("/api/offerings", offeringRoutes);
+  app.route("/api/registry", registryRoutes);
 
   app.notFound((c) => c.json({ error: "찾을 수 없습니다." }, 404));
   app.onError((err, c) => {

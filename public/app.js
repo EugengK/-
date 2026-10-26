@@ -99,7 +99,7 @@ async function act(button, fn) {
 const isEditor = () => state.me?.role === "editor";
 
 function currentTab() {
-  const t = location.hash.slice(1);
+  const t = location.hash.slice(1).split("/")[0];
   return t in routes ? t : isEditor() ? "entry" : "offerings";
 }
 /**
@@ -119,8 +119,6 @@ async function loadFunds() {
 async function loadMembers() {
   state.members = await api("GET", "/api/members");
 }
-const memberLabel = (m) => (m.note ? `${m.name} (${m.note})` : m.name);
-
 /**
  * Unique text for each member in the giver list. When two people share a name, every one of them
  * gets a distinguishing label (note, or #id), so typing the bare name is never silently one of them.
@@ -131,7 +129,7 @@ function memberChoices() {
   const raw = state.members.map((m) => ({
     id: m.id,
     name: m.name,
-    label: byName.get(m.name) > 1 ? (m.note ? `${m.name} (${m.note})` : `${m.name} #${m.id}`) : m.name,
+    label: byName.get(m.name) > 1 ? `${m.name} (${m.current_title || m.relation || `#${m.id}`})` : m.name,
   }));
   const byLabel = new Map();
   for (const c of raw) byLabel.set(c.label, (byLabel.get(c.label) ?? 0) + 1);
@@ -147,7 +145,7 @@ function resolveGiver(text, choices) {
   const sameName = choices.filter((c) => c.name === t);
   if (sameName.length === 1) return { id: sameName[0].id };
   if (sameName.length > 1) return { error: `'${t}' 이름이 ${sameName.length}명 있습니다. 목록에서 정확히 골라 주세요.` };
-  return { error: `'${t}'은(는) 성도 명부에 없습니다. 목록에서 고르거나 '성도' 탭에서 먼저 추가하세요.` };
+  return { error: `'${t}'은(는) 성도 명부에 없습니다. 목록에서 고르거나, 목사님께 교적부 등록을 요청하세요.` };
 }
 
 // ---------- 헌금 입력 ----------
@@ -393,80 +391,211 @@ function voidOffering(btn, o, after) {
   });
 }
 
-// ---------- 성도 ----------
+// ---------- 교적부 ----------
 
-async function renderMembers() {
+const STATUS_LABELS = {
+  registered: "등록", attending: "출석", inactive: "장기결석", left: "떠남",
+  transferred: "이명(전출)", returned: "복귀", deceased: "별세",
+};
+const LEFT_CODES = new Set(["left", "transferred", "deceased"]);
+const isRegistryAdmin = () => state.me?.registry_admin === true;
+const statusTag = (code) =>
+  code ? h("span", { class: `tag ${LEFT_CODES.has(code) ? "void" : ""}` }, STATUS_LABELS[code] ?? code) : null;
+const titleTag = (t) => (t ? h("span", { class: "tag online" }, t) : null);
+const thisYear = () => String(new Date().getFullYear());
+
+async function renderRegistry() {
   const ticket = newTicket();
+  const id = Number(location.hash.split("/")[1]);
+  if (id) return renderRegistryMember(ticket, id);
+
   const q = h("input", { type: "search", placeholder: "이름 검색", "aria-label": "이름 검색" });
-  const showInactive = h("input", { type: "checkbox", style: "width:auto;min-height:0" });
+  const which = h("select", { "aria-label": "보기" },
+    h("option", { value: "current" }, "현재 교인"),
+    h("option", { value: "left" }, "떠난 분 (떠남·이명·별세)"),
+    h("option", { value: "all" }, "전체"));
   const list = h("ul", { class: "list" });
+  const counter = h("span", { class: "muted" });
+  let seq = 0;
   const load = async () => {
-    const p = new URLSearchParams();
+    const mine = ++seq;
+    const p = new URLSearchParams({ include_inactive: "1" });
     if (q.value.trim()) p.set("q", q.value.trim());
-    if (showInactive.checked) p.set("include_inactive", "1");
-    const rows = await api("GET", `/api/members?${p}`);
+    const rows = (await api("GET", `/api/members?${p}`)).filter((m) =>
+      which.value === "all" ? true : which.value === "left" ? LEFT_CODES.has(m.current_status) : !LEFT_CODES.has(m.current_status));
+    if (mine !== seq) return;
+    counter.textContent = `${rows.length}명`;
     list.replaceChildren(
       ...(rows.length
         ? rows.map((m) =>
             h("li", {},
-              h("div", { class: "grow" }, h("b", {}, m.name), m.is_active ? "" : h("span", { class: "tag void" }, " 비활성"),
-                m.phone ? h("div", { class: "muted" }, m.phone) : null,
-                m.note ? h("div", { class: "muted" }, m.note) : null),
-              h("div", { class: "editor-only row shrink" },
-                h("button", { type: "button", class: "secondary small", onclick: (e) => editMember(e.currentTarget, m, load) }, "수정"),
-                h("button", { type: "button", class: "danger small", onclick: (e) =>
-                  act(e.currentTarget, async () => {
-                    await api("PATCH", `/api/members/${m.id}`, { is_active: !m.is_active, expected: { is_active: m.is_active } });
-                    await load();
-                  }) }, m.is_active ? "비활성화" : "다시 사용"))))
-        : [h("li", { class: "muted" }, "성도가 없습니다.")]),
+              h("a", { class: "grow", href: `#registry/${m.id}`, style: "color:inherit;text-decoration:none" },
+                h("b", {}, m.name), " ", titleTag(m.current_title), " ", statusTag(m.current_status),
+                h("div", { class: "muted" }, [m.relation, m.member_code ? null : "직접 등록"].filter(Boolean).join(" · "))),
+              h("span", { class: "muted shrink" }, "›")))
+        : [h("li", { class: "muted" }, "해당하는 분이 없습니다.")]),
     );
   };
   let timer;
   q.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => act(null, load), 250); });
-  showInactive.addEventListener("change", () => act(null, load));
+  which.addEventListener("change", () => act(null, load));
 
+  // Pastor only: people who aren't in the sheet (e.g. a regular visitor who gives).
   const name = h("input", { placeholder: "이름", maxlength: 50 });
-  const phone = h("input", { placeholder: "연락처 (선택)", inputmode: "tel", maxlength: 30 });
-  const note = h("input", { placeholder: "메모 (선택, 동명이인 구분 등)", maxlength: 300 });
+  const relation = h("input", { placeholder: "관계 (선택, 예: 본인·자녀)", maxlength: 20 });
+  const note = h("input", { placeholder: "메모 (선택)", maxlength: 300 });
   const add = h("button", { type: "button" }, "추가");
   add.onclick = () =>
     act(add, async () => {
-      await api("POST", "/api/members", { name: name.value, phone: phone.value, note: note.value });
-      name.value = phone.value = note.value = "";
+      await api("POST", "/api/members", { name: name.value, relation: relation.value, note: note.value });
+      name.value = relation.value = note.value = "";
       toast("추가했습니다.");
       await load();
     });
 
-  paint(ticket, 
-    h("h2", {}, "성도"),
-    h("div", { class: "card editor-only" }, h("h3", {}, "성도 추가"), h("div", { class: "grid" }, name, phone, note, add)),
+  const expiring = h("div");
+  const loadExpiring = async () => {
+    const rows = await api("GET", `/api/registry/expiring?year=${thisYear()}`);
+    expiring.replaceChildren(
+      ...(rows.length
+        ? [h("div", { class: "card" },
+            h("h3", {}, `${thisYear()}년 임기 만료 예정 (${rows.length}명)`),
+            h("ul", { class: "list" }, rows.map((r) =>
+              h("li", {}, h("a", { class: "grow", href: `#registry/${r.member_id}` }, `${r.member_name} · ${r.title_name}`), h("span", { class: "muted" }, `~${r.end_date}`)))))]
+        : []),
+    );
+  };
+
+  paint(ticket,
+    h("h2", {}, "교적부"),
+    h("p", { class: "muted" }, "새가족은 목양 시트에서 자동으로 들어옵니다. 직분과 출석 상태는 여기에서 관리합니다."),
+    expiring,
     h("div", { class: "card" },
-      h("div", { class: "row" }, q, h("label", { class: "shrink", style: "display:flex;gap:6px;align-items:center;margin:0" }, showInactive, "비활성 포함")),
+      h("div", { class: "row" }, q, which),
+      h("div", { class: "mt" }, counter),
       list),
+    h("div", { class: "card registry-only" }, h("h3", {}, "직접 추가 (시트에 없는 분)"), h("div", { class: "grid" }, name, relation, note, add)),
   );
-  await act(null, load);
+  await act(null, () => Promise.all([load(), loadExpiring()]));
 }
 
-function editMember(btn, m, after) {
-  const name = prompt("이름", m.name);
-  if (name === null) return;
-  const phone = prompt("연락처 (비우면 삭제)", m.phone ?? "");
-  if (phone === null) return;
-  const note = prompt("메모 (비우면 삭제)", m.note ?? "");
-  if (note === null) return;
-  // Send only what changed, plus what the screen showed, so another editor's change is not overwritten.
-  const body = {};
-  if (name.trim() !== m.name) body.name = name;
-  if (phone.trim() !== (m.phone ?? "")) body.phone = phone;
-  if (note.trim() !== (m.note ?? "")) body.note = note;
-  if (!Object.keys(body).length) return;
-  body.expected = { name: m.name, phone: m.phone, note: m.note };
-  act(btn, async () => {
-    await api("PATCH", `/api/members/${m.id}`, body);
-    toast("수정했습니다.");
-    await after();
-  });
+async function renderRegistryMember(ticket, id) {
+  const [m, titles] = await Promise.all([api("GET", `/api/registry/members/${id}`), api("GET", "/api/registry/titles")]);
+  const reload = () => { renderRegistry(); };
+
+  const voidBtn = (path, what) =>
+    h("button", { type: "button", class: "danger small registry-only", onclick: (e) => {
+      const reason = prompt(`${what}\n이 기록을 취소합니다. 사유를 입력하세요.`);
+      if (reason === null) return;
+      act(e.currentTarget, async () => { await api("POST", path, { reason }); toast("취소했습니다."); reload(); });
+    } }, "취소");
+
+  // 직분 추가
+  const titleSel = h("select", { "aria-label": "직분" }, titles.filter((t) => t.is_active).map((t) => h("option", { value: t.id }, t.term_limited ? `${t.name} (1년 임기)` : t.name)));
+  const tStart = h("input", { type: "date", value: `${thisYear()}-01-01`, "aria-label": "시작일" });
+  const tEnd = h("input", { type: "date", "aria-label": "종료일" });
+  const tNote = h("input", { placeholder: "메모 (선택)", maxlength: 300 });
+  const syncEnd = () => {
+    const t = titles.find((x) => String(x.id) === titleSel.value);
+    tEnd.value = t?.term_limited && tStart.value ? `${tStart.value.slice(0, 4)}-12-31` : "";
+  };
+  titleSel.addEventListener("change", syncEnd);
+  tStart.addEventListener("change", syncEnd);
+  syncEnd();
+  const tAdd = h("button", { type: "button" }, "직분 추가");
+  tAdd.onclick = () =>
+    act(tAdd, async () => {
+      await api("POST", `/api/registry/members/${id}/titles`, {
+        title_id: Number(titleSel.value), start_date: tStart.value, end_date: tEnd.value || null, note: tNote.value || undefined,
+      });
+      toast("직분을 기록했습니다.");
+      reload();
+    });
+
+  // 상태 추가
+  const sSel = h("select", { "aria-label": "상태" }, Object.entries(STATUS_LABELS).filter(([k]) => k !== "registered").map(([k, v]) => h("option", { value: k }, v)));
+  const sDate = h("input", { type: "date", value: ymd(new Date()), "aria-label": "날짜" });
+  const sNote = h("input", { placeholder: "메모 (선택)", maxlength: 300 });
+  const sAdd = h("button", { type: "button" }, "상태 기록");
+  sAdd.onclick = () =>
+    act(sAdd, async () => {
+      await api("POST", `/api/registry/members/${id}/status`, { status_code: sSel.value, event_date: sDate.value, note: sNote.value || undefined });
+      toast("상태를 기록했습니다.");
+      reload();
+    });
+
+  const years = [...new Set(m.giving_by_year.map((g) => g.year))];
+  paint(ticket,
+    h("p", {}, h("a", { href: "#registry" }, "‹ 교적부 목록")),
+    h("h2", {}, m.name, " ", titleTag(m.current_title), " ", statusTag(m.current_status)),
+    h("div", { class: "card" },
+      h("ul", { class: "list" },
+        h("li", {}, h("span", {}, "관계"), h("b", {}, m.relation ?? "-")),
+        h("li", {}, h("span", {}, "교인ID"), h("b", {}, m.member_code ?? "직접 등록")),
+        h("li", {}, h("span", {}, "등록일"), h("b", {}, m.registered_on ?? "-")),
+        m.family.length
+          ? h("li", {}, h("span", {}, "가족"), h("span", { class: "grow", style: "text-align:right" },
+              m.family.flatMap((f, i) => [i ? ", " : "", h("a", { href: `#registry/${f.id}` }, `${f.name}${f.relation ? `(${f.relation})` : ""}`)])))
+          : null)),
+    h("div", { class: "card" },
+      h("h3", {}, "직분 이력"),
+      m.titles.length
+        ? h("ul", { class: "list" }, m.titles.map((t) =>
+            h("li", { class: t.status === "void" ? "void-row" : "" },
+              h("div", { class: "grow" }, h("b", {}, t.title_name), ` ${t.start_date} ~ ${t.end_date ?? ""}`,
+                t.note ? h("div", { class: "muted" }, t.note) : null,
+                t.status === "void" ? h("div", {}, h("span", { class: "tag void" }, "취소됨"), " ", t.void_reason) : null),
+              t.status === "active" ? voidBtn(`/api/registry/member-titles/${t.id}/void`, `${t.title_name} ${t.start_date}`) : null)))
+        : h("p", { class: "muted" }, "직분 기록이 없습니다."),
+      h("div", { class: "grid mt registry-only" },
+        h("div", { class: "row" }, h("div", {}, h("label", {}, "직분"), titleSel), h("div", {}, h("label", {}, "시작일"), tStart), h("div", {}, h("label", {}, "종료일 (비우면 계속)"), tEnd)),
+        tNote, tAdd)),
+    h("div", { class: "card" },
+      h("h3", {}, "출석 상태 이력"),
+      h("ul", { class: "list" }, m.statuses.map((s) =>
+        h("li", { class: s.status === "void" ? "void-row" : "" },
+          h("div", { class: "grow" }, statusTag(s.status_code), ` ${s.event_date}`,
+            s.note ? h("div", { class: "muted" }, s.note) : null,
+            s.status === "void" ? h("div", {}, h("span", { class: "tag void" }, "취소됨"), " ", s.void_reason) : null),
+          s.status === "active" ? voidBtn(`/api/registry/status-events/${s.id}/void`, `${STATUS_LABELS[s.status_code]} ${s.event_date}`) : null))),
+      h("div", { class: "grid mt registry-only" },
+        h("div", { class: "row" }, h("div", {}, h("label", {}, "상태"), sSel), h("div", {}, h("label", {}, "날짜"), sDate)),
+        sNote, sAdd)),
+    h("div", { class: "card" },
+      h("h3", {}, "헌금 합계 (연도별)"),
+      years.length
+        ? h("table", {}, h("tbody", {}, years.flatMap((y) => {
+            const rows = m.giving_by_year.filter((g) => g.year === y);
+            const total = rows.reduce((s, g) => s + g.total_cents, 0);
+            return [
+              h("tr", {}, h("th", {}, `${y}년`), h("th", { class: "num" }, money(total))),
+              ...rows.map((g) => h("tr", {}, h("td", { class: "muted" }, `${g.fund_type_name} (${g.count}건)`), h("td", { class: "num" }, money(g.total_cents)))),
+            ];
+          })))
+        : h("p", { class: "muted" }, "헌금 기록이 없습니다.")),
+  );
+}
+
+function titlesCard() {
+  const list = h("ul", { class: "list" });
+  const load = async () => {
+    const rows = await api("GET", "/api/registry/titles");
+    list.replaceChildren(...rows.map((t) =>
+      h("li", {},
+        h("div", { class: "grow" }, t.name, t.term_limited ? h("span", { class: "tag" }, " 1년 임기") : "", t.is_active ? "" : h("span", { class: "tag void" }, " 사용 중지")),
+        h("div", { class: "registry-only row shrink" },
+          h("button", { type: "button", class: "secondary small", onclick: (e) =>
+            act(e.currentTarget, async () => { await api("PATCH", `/api/registry/titles/${t.id}`, { term_limited: !t.term_limited }); await load(); }) },
+            t.term_limited ? "임기 없음으로" : "1년 임기로"),
+          h("button", { type: "button", class: "danger small", onclick: (e) =>
+            act(e.currentTarget, async () => { await api("PATCH", `/api/registry/titles/${t.id}`, { is_active: !t.is_active }); await load(); }) },
+            t.is_active ? "사용 중지" : "다시 사용")))));
+  };
+  const input = h("input", { placeholder: "새 직분 이름", maxlength: 50 });
+  const add = h("button", { type: "button", class: "shrink" }, "추가");
+  add.onclick = () => act(add, async () => { await api("POST", "/api/registry/titles", { name: input.value }); input.value = ""; await load(); });
+  const card = h("div", { class: "card" }, h("h3", {}, "직분 목록"), list, h("div", { class: "row mt registry-only" }, input, add));
+  return { card, load };
 }
 
 // ---------- 설정 ----------
@@ -557,6 +686,7 @@ async function renderSettings() {
   const cards = [
     openingBalanceCard(),
     lookupCard("헌금 종류", "/api/fund-types"),
+    titlesCard(),
     lookupCard("부서", "/api/departments"),
     lookupCard("지출 항목", "/api/expense-categories"),
   ];
@@ -569,7 +699,7 @@ async function renderSettings() {
         h("li", {}, h("span", {}, "교회"), h("b", {}, s.church_name ?? "")),
         h("li", {}, h("span", {}, "교회 회계연도 시작"), h("b", {}, `${s.church_fiscal_year_start_month ?? "?"}월`)),
         h("li", {}, h("span", {}, "호주 보고 연도 시작"), h("b", {}, `${s.au_fiscal_year_start_month ?? "?"}월`)),
-        h("li", {}, h("span", {}, "내 계정"), h("b", {}, `${state.me.name} · ${isEditor() ? "기록 담당" : "열람"}`)))),
+        h("li", {}, h("span", {}, "내 계정"), h("b", {}, roleText())))),
     ...cards.map((c) => c.card),
   );
   await act(null, () => Promise.all(cards.map((c) => c.load())));
@@ -579,7 +709,8 @@ async function renderSettings() {
 
 const TABLE_NAMES = {
   fund_types: "헌금 종류", departments: "부서", expense_categories: "지출 항목",
-  opening_balances: "시작 잔액", members: "성도", offerings: "헌금",
+  opening_balances: "시작 잔액", members: "교적부", offerings: "헌금",
+  titles: "직분 목록", member_titles: "직분", member_status_events: "출석 상태",
 };
 const ACTION_NAMES = { create: "추가", update: "수정", void: "취소" };
 
@@ -592,6 +723,8 @@ function describe(entry) {
   if (entry.action === "void") parts.push(b.amount_cents !== undefined ? money(b.amount_cents) : "", `사유: ${a.void_reason ?? ""}`);
   if (a.is_active !== undefined && b.is_active !== undefined && a.is_active !== b.is_active) parts.push(a.is_active ? "다시 사용" : "사용 중지");
   if (a.offering_date) parts.push(a.offering_date);
+  if (a.title_name) parts.push(`${a.title_name} ${a.start_date ?? ""}~${a.end_date ?? ""}`);
+  if (a.status_code) parts.push(`${STATUS_LABELS[a.status_code] ?? a.status_code} ${a.event_date ?? ""}`);
   return parts.filter(Boolean).join(" · ");
 }
 
@@ -618,7 +751,8 @@ async function renderAudit() {
 
 // ---------- routing ----------
 
-const routes = { entry: renderEntry, offerings: renderOfferings, members: renderMembers, settings: renderSettings, audit: renderAudit };
+const routes = { entry: renderEntry, offerings: renderOfferings, registry: renderRegistry, settings: renderSettings, audit: renderAudit };
+const roleText = () => `${state.me.name} · ${isEditor() ? "재정 기록" : "재정 열람"}${isRegistryAdmin() ? " · 교적부 관리" : ""}`;
 
 async function route() {
   const tab = currentTab();
@@ -639,9 +773,10 @@ async function start() {
     return;
   }
   document.body.classList.toggle("viewer", !isEditor());
+  document.body.classList.toggle("no-registry", !isRegistryAdmin());
   document.getElementById("church-name").textContent = state.settings.church_name || "교회 회계";
   document.title = `${state.settings.church_name || "교회"} 회계`;
-  document.getElementById("who").textContent = `${state.me.name} · ${isEditor() ? "기록 담당" : "열람"}`;
+  document.getElementById("who").textContent = roleText();
   window.addEventListener("hashchange", route);
   route();
 }

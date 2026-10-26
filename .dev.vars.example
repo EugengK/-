@@ -2,3 +2,5 @@
 # Local-only login: honoured only when ENVIRONMENT=development AND the request host is localhost.
 ENVIRONMENT=development
 DEV_AUTH_EMAIL=editor1@example.com
+# Shared secret for the 목양 sheet → 교적부 sync (any random string of 32+ characters).
+SYNC_TOKEN=local-dev-sync-token-please-change-0000
