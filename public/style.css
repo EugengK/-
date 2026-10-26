@@ -61,3 +61,10 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 .no-registry .registry-only { display: none !important; }
 .notice { padding: 10px 12px; border-radius: 8px; background: #fff8e6; border: 1px solid #f1dfae; font-size: 14px; margin-bottom: 12px; }
 .mt { margin-top: 10px; }
+
+.chips { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px; }
+.chip-item { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fbfcfd; font-size: 15px; min-height: 40px; }
+.chip-item.off { color: var(--muted); background: #f3f4f6; }
+button.mini { min-height: 30px; padding: 2px 8px; font-size: 13px; background: transparent; color: var(--brand); border: 0; }
+button.mini.danger-text { color: var(--danger); }
+details > summary { cursor: pointer; list-style: revert; }

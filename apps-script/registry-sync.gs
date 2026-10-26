@@ -1,8 +1,9 @@
 /**
  * 목양 나눔 기록 → 교적부 연동 (Google Apps Script)
  *
- * 이 스크립트는 '교인목록' 탭에서 다섯 칸만 골라 회계 서버의 교적부로 보냅니다:
- *   교인ID, 가정ID, 이름, 관계, 등록일 (최초등록일, 없으면 등록일시의 날짜)
+ * 이 스크립트는 '교인목록' 탭에서 아래 칸만 골라 회계 서버의 교적부로 보냅니다:
+ *   교인ID, 가정ID, 이름, 관계, 생년월일, 직분, 등록일 (최초등록일, 없으면 등록일시의 날짜)
+ *   직분은 처음 등록할 때만 쓰이고, 그 뒤 직분 변경은 교적부에서 합니다.
  * 상담 내용, 신앙 상태, 기도제목, 주소, 생년월일 등 다른 칸은 읽지도 보내지도 않습니다.
  *
  * 설정 (한 번만):
@@ -22,6 +23,9 @@
 
 const SHEET_NAME = '교인목록';
 const COLUMNS = { member_code: '교인ID', family_code: '가정ID', name: '이름', relation: '관계', registered_at: '등록일시' };
+// Optional columns: used when present.
+const BIRTH = '생년월일';
+const TITLE = '직분';
 // Optional: when filled, the original registration date is used instead of the sheet entry time.
 const FIRST_REGISTERED = '최초등록일';
 const CHUNK = 100; // the server accepts up to 100 people per request
@@ -77,6 +81,9 @@ function sendToRegistry() {
   }
 
   const first = header.indexOf(FIRST_REGISTERED);
+  const birthCol = header.indexOf(BIRTH);
+  const titleCol = header.indexOf(TITLE);
+  const today = Utilities.formatDate(new Date(), 'Australia/Hobart', 'yyyy-MM-dd');
   const people = [];
   const skipped = [];
   values.slice(1).forEach((row, i) => {
@@ -91,6 +98,9 @@ function sendToRegistry() {
       family && !/^[A-Za-z0-9-]{3,40}$/.test(family) ? '가정ID 형식' :
       !name || name.length > 50 ? '이름' :
       relation.length > 20 ? '관계' : '';
+    const title = titleCol >= 0 ? String(row[titleCol]).trim() : '';
+    let birth = birthCol >= 0 ? toDate(row[birthCol]) : null;
+    if (birth && (birth < '1900-01-01' || birth > today)) birth = null;
     if (problem) {
       skipped.push(`${i + 2}행 (${problem})`);
       return;
@@ -101,6 +111,8 @@ function sendToRegistry() {
       name: name,
       relation: relation || null,
       registered_on: (first >= 0 && toDate(row[first])) || toDate(row[col.registered_at]),
+      birth_date: birth,
+      title: title && title.length <= 20 ? title : null,
     });
   });
 

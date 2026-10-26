@@ -68,7 +68,7 @@ memberRoutes.get("/", async (c) => {
   }
   const { results } = await c.env.DB.prepare(
     `SELECT m.id, m.name, m.phone, m.email, m.note, m.relation, m.is_active, m.member_code, m.family_code,
-            m.registered_on, ${CURRENT_TITLE} AS current_title, ${CURRENT_STATUS} AS current_status
+            m.registered_on, m.birth_date, ${CURRENT_TITLE} AS current_title, ${CURRENT_STATUS} AS current_status
      FROM members m ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY m.name, m.id`,
   )
     .bind(...binds)

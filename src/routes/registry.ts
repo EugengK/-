@@ -5,6 +5,7 @@ import { auditStatement } from "../audit";
 import { todayInHobart } from "../dates";
 import { CURRENT_STATUS, CURRENT_TITLE, SYNC_ACTIVE_SQL } from "../registrySql";
 import type { AppEnv } from "../types";
+import { applyPeople, firstTitleStatements, loadTitles, peopleSchema } from "./sync";
 import { isUniqueViolation, isoDate, name, optionalText, parseBody, reason } from "../validation";
 
 const STATUS_CODES = ["registered", "attending", "inactive", "left", "transferred", "returned", "deceased"] as const;
@@ -99,7 +100,7 @@ registryRoutes.get("/members/:id{[0-9]+}", async (c) => {
   const today = todayInHobart();
   const member = await db
     .prepare(
-      `SELECT m.id, m.name, m.phone, m.note, m.relation, m.member_code, m.family_code, m.registered_on, m.is_active,
+      `SELECT m.id, m.name, m.phone, m.note, m.relation, m.member_code, m.family_code, m.registered_on, m.birth_date, m.is_active,
               ${CURRENT_TITLE} AS current_title, ${CURRENT_STATUS} AS current_status
        FROM members m WHERE m.id = ?2`,
     )
@@ -123,7 +124,7 @@ registryRoutes.get("/members/:id{[0-9]+}", async (c) => {
       )
       .bind(id),
     db
-      .prepare("SELECT id, name, relation, is_active FROM members WHERE family_code IS NOT NULL AND family_code = ? AND id != ? ORDER BY id")
+      .prepare("SELECT id, name, relation, birth_date, is_active FROM members WHERE family_code IS NOT NULL AND family_code = ? AND id != ? ORDER BY birth_date IS NULL, birth_date, id")
       .bind(member.family_code ?? null, id),
     db
       .prepare(
@@ -260,6 +261,8 @@ interface PendingRow {
   name: string;
   relation: string | null;
   registered_on: string | null;
+  birth_date: string | null;
+  title: string | null;
   seen_at: string;
 }
 
@@ -267,8 +270,8 @@ interface PendingRow {
 registryRoutes.get("/pending", async (c) => {
   const db = c.env.DB;
   const [pending, candidates] = await db.batch([
-    db.prepare("SELECT member_code, family_code, name, relation, registered_on, seen_at FROM sync_pending ORDER BY seen_at, member_code"),
-    db.prepare("SELECT id, name, relation, note, registered_on FROM members WHERE member_code IS NULL ORDER BY id"),
+    db.prepare("SELECT member_code, family_code, name, relation, registered_on, birth_date, title, seen_at FROM sync_pending ORDER BY seen_at, member_code"),
+    db.prepare("SELECT id, name, relation, note, birth_date, registered_on FROM members WHERE member_code IS NULL ORDER BY id"),
   ]);
   const cands = candidates!.results as { id: number; name: string }[];
   return c.json(
@@ -290,21 +293,32 @@ registryRoutes.post(`${CODE}/link`, async (c) => {
   const body = await parseBody(c, z.object({ member_id: z.number().int().positive() }).strict());
   const db = c.env.DB;
   const before = await db
-    .prepare("SELECT id, name, member_code, family_code, relation FROM members WHERE id = ?")
+    .prepare("SELECT id, name, member_code, family_code, relation, birth_date FROM members WHERE id = ?")
     .bind(body.member_id)
     .first<Record<string, unknown>>();
   if (!before) throw new HTTPException(404, { message: "찾을 수 없습니다." });
   if (before.member_code !== null) throw new HTTPException(409, { message: "이미 다른 교인ID와 연결된 분입니다." });
-  const after = { member_code: p.member_code, family_code: p.family_code, relation: p.relation ?? before.relation };
+  const after = {
+    member_code: p.member_code,
+    family_code: p.family_code,
+    relation: p.relation ?? before.relation,
+    birth_date: p.birth_date ?? before.birth_date,
+  };
+  const { title } = (await loadTitles(db))(p.title);
+  const hasTitle = await db.prepare("SELECT 1 FROM member_titles WHERE member_id = ?").bind(body.member_id).first();
+  const user = c.get("user");
   const [u] = await db.batch([
     db
-      .prepare("UPDATE members SET member_code = ?, family_code = ?, relation = ? WHERE id = ? AND member_code IS NULL")
-      .bind(after.member_code, after.family_code, after.relation, body.member_id),
-    auditStatement(db, c.get("user"), "update", "members", body.member_id, before, after, true),
+      .prepare("UPDATE members SET member_code = ?, family_code = ?, relation = ?, birth_date = ? WHERE id = ? AND member_code IS NULL")
+      .bind(after.member_code, after.family_code, after.relation, after.birth_date, body.member_id),
+    auditStatement(db, user, "update", "members", body.member_id, before, after, true),
     // changes() here is the audit insert, which only happened if the link above did.
     db.prepare("DELETE FROM sync_pending WHERE member_code = ? AND changes() > 0").bind(p.member_code),
   ]);
   if (u!.meta.changes === 0) throw new HTTPException(409, { message: "이미 다른 교인ID와 연결된 분입니다." });
+  if (title && !hasTitle) {
+    await db.batch(firstTitleStatements(db, user, p.member_code, title, p.registered_on ?? todayInHobart()));
+  }
   return c.json({ ok: true });
 });
 
@@ -314,12 +328,13 @@ registryRoutes.post(`${CODE}/create`, async (c) => {
   const db = c.env.DB;
   const user = c.get("user");
   const date = p.registered_on ?? todayInHobart();
-  const row = { member_code: p.member_code, name: p.name, family_code: p.family_code, relation: p.relation };
+  const row = { member_code: p.member_code, name: p.name, family_code: p.family_code, relation: p.relation, birth_date: p.birth_date };
+  const { title } = (await loadTitles(db))(p.title);
   try {
     await db.batch([
       db
-        .prepare("INSERT INTO members (name, member_code, family_code, relation, registered_on) VALUES (?, ?, ?, ?, ?)")
-        .bind(p.name, p.member_code, p.family_code, p.relation, date),
+        .prepare("INSERT INTO members (name, member_code, family_code, relation, birth_date, registered_on) VALUES (?, ?, ?, ?, ?, ?)")
+        .bind(p.name, p.member_code, p.family_code, p.relation, p.birth_date, date),
       auditStatement(db, user, "create", "members", "last_insert", undefined, row),
       db
         .prepare(
@@ -327,10 +342,22 @@ registryRoutes.post(`${CODE}/create`, async (c) => {
         )
         .bind(date, user.id, p.member_code),
       db.prepare("DELETE FROM sync_pending WHERE member_code = ?").bind(p.member_code),
+      ...(title ? firstTitleStatements(db, user, p.member_code, title, date) : []),
     ]);
   } catch (err) {
     if (isUniqueViolation(err)) throw new HTTPException(409, { message: "이미 등록된 교인ID입니다." });
     throw err;
   }
   return c.json({ ok: true }, 201);
+});
+
+// ---------- CSV 가져오기 ----------
+
+/**
+ * The pastor uploads the 교인목록 tab as CSV; the browser extracts the allowed columns and sends
+ * them here in chunks. Same rules as the sheet script, attributed to the pastor in the audit log.
+ */
+registryRoutes.post("/import", async (c) => {
+  const body = await parseBody(c, peopleSchema);
+  return c.json(await applyPeople(c.env.DB, c.get("user"), body.people));
 });

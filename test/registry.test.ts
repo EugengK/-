@@ -29,18 +29,18 @@ async function newMember(name: string) {
 describe("titles (직분)", () => {
   beforeEach(resetDb);
 
-  it("seeds the six titles; 서리집사 is a yearly appointment", async () => {
+  it("seeds the eight titles; 서리집사 is a yearly appointment", async () => {
     const t = await json(await call("GET", "/api/registry/titles", { as: EDITOR }));
-    expect(t.map((x: any) => x.name)).toEqual(["성도", "청년", "서리집사", "장립집사", "권사", "장로"]);
+    expect(t.map((x: any) => x.name)).toEqual(["성도", "청년", "서리집사", "장립집사", "권사", "장로", "전도사", "강도사"]);
     expect(t.find((x: any) => x.name === "서리집사").term_limited).toBe(true);
     expect(t.find((x: any) => x.name === "장로").term_limited).toBe(false);
   });
 
   it("only the pastor manages titles", async () => {
-    expect((await call("POST", "/api/registry/titles", { as: EDITOR, body: { name: "전도사" } })).status).toBe(403);
-    const r = await call("POST", "/api/registry/titles", { as: PASTOR, body: { name: "전도사" } });
+    expect((await call("POST", "/api/registry/titles", { as: EDITOR, body: { name: "목사" } })).status).toBe(403);
+    const r = await call("POST", "/api/registry/titles", { as: PASTOR, body: { name: "목사" } });
     expect(r.status).toBe(201);
-    expect((await call("POST", "/api/registry/titles", { as: PASTOR, body: { name: "전도사" } })).status).toBe(409);
+    expect((await call("POST", "/api/registry/titles", { as: PASTOR, body: { name: "목사" } })).status).toBe(409);
     const id = (await json(r)).id;
     expect((await call("PATCH", `/api/registry/titles/${id}`, { as: PASTOR, body: { is_active: false } })).status).toBe(200);
   });
@@ -169,16 +169,16 @@ describe("sheet sync", () => {
 
   it("adds new people as registered, then only updates what changed", async () => {
     const r1 = await sync({ people: [person("P-1", "윤영자"), person("P-2", "정경남", { relation: "배우자" })] });
-    expect(await json(r1)).toEqual({ created: 2, updated: 0, pending: 0, unchanged: 0 });
+    expect(await json(r1)).toEqual({ created: 2, updated: 0, pending: 0, unchanged: 0, unknown_titles: [] });
     const rows = await db.prepare("SELECT name, member_code, family_code, relation, registered_on, is_active FROM members ORDER BY member_code").all();
     expect(rows.results[0]).toMatchObject({ name: "윤영자", member_code: "P-1", family_code: "F-1", relation: "본인", registered_on: "2026-08-09", is_active: 1 });
     expect(await count("SELECT COUNT(*) AS n FROM member_status_events WHERE status_code = 'registered' AND event_date = '2026-08-09'")).toBe(2);
     expect(await count("SELECT COUNT(*) AS n FROM audit_log WHERE user_email = 'sheet-sync@system.local' AND action = 'create'")).toBe(2);
 
     const r2 = await sync({ people: [person("P-1", "윤영자"), person("P-2", "정경남 ", { relation: "배우자" })] });
-    expect(await json(r2)).toEqual({ created: 0, updated: 0, pending: 0, unchanged: 2 });
+    expect(await json(r2)).toEqual({ created: 0, updated: 0, pending: 0, unchanged: 2, unknown_titles: [] });
     const r3 = await sync({ people: [person("P-1", "윤영자B")] });
-    expect(await json(r3)).toEqual({ created: 0, updated: 1, pending: 0, unchanged: 0 });
+    expect(await json(r3)).toEqual({ created: 0, updated: 1, pending: 0, unchanged: 0, unknown_titles: [] });
     expect(await count("SELECT COUNT(*) AS n FROM members WHERE name = '윤영자B'")).toBe(1);
   });
 
@@ -194,10 +194,10 @@ describe("sheet sync", () => {
     expect(d.titles).toHaveLength(1);
   });
 
-  it("accepts only the five fields (no counselling data can come in)", async () => {
+  it("accepts only the seven fields (no counselling data can come in)", async () => {
     for (const p of [
       person("P-1", "a", { 메모: "상담 내용" }),
-      person("P-1", "a", { birth_date: "1960-01-01" }),
+      person("P-1", "a", { address: "1 Main St" }),
       { ...person("P-1", "a"), name: "" },
       person("bad code!", "a"),
     ]) {
@@ -211,9 +211,9 @@ describe("sheet sync", () => {
 
   it("handles full batches of 100 new people, and a second batch with 100 already known", async () => {
     const batch = (from: number) => Array.from({ length: 100 }, (_, i) => person(`P-${from + i}`, `사람${from + i}`));
-    expect(await json(await sync({ people: batch(0) }))).toEqual({ created: 100, updated: 0, pending: 0, unchanged: 0 });
-    expect(await json(await sync({ people: batch(100) }))).toEqual({ created: 100, updated: 0, pending: 0, unchanged: 0 });
-    expect(await json(await sync({ people: batch(50) }))).toEqual({ created: 0, updated: 0, pending: 0, unchanged: 100 });
+    expect(await json(await sync({ people: batch(0) }))).toEqual({ created: 100, updated: 0, pending: 0, unchanged: 0, unknown_titles: [] });
+    expect(await json(await sync({ people: batch(100) }))).toEqual({ created: 100, updated: 0, pending: 0, unchanged: 0, unknown_titles: [] });
+    expect(await json(await sync({ people: batch(50) }))).toEqual({ created: 0, updated: 0, pending: 0, unchanged: 100, unknown_titles: [] });
     expect(await count("SELECT COUNT(*) AS n FROM member_status_events")).toBe(200);
   });
 });
@@ -224,7 +224,7 @@ describe("review fixes: no duplicates on first sync, history consistency", () =>
   it("holds a sheet person whose name matches a hand-entered member, until the pastor decides", async () => {
     const old = await newMember("김철수"); // entered by hand before the sync, may have giving history
     const r = await json(await sync({ people: [person("P-1", "김철수"), person("P-2", "이영희")] }));
-    expect(r).toEqual({ created: 1, updated: 0, pending: 1, unchanged: 0 });
+    expect(r).toEqual({ created: 1, updated: 0, pending: 1, unchanged: 0, unknown_titles: [] });
     expect(await count("SELECT COUNT(*) AS n FROM members WHERE name = '김철수'")).toBe(1);
     // Re-sending keeps it pending (no duplicate either way).
     expect(await json(await sync({ people: [person("P-1", "김철수")] }))).toMatchObject({ pending: 1, created: 0 });
@@ -266,5 +266,68 @@ describe("review fixes: no duplicates on first sync, history consistency", () =>
     const r = await call("POST", `/api/registry/members/${m.id}/status`, { as: PASTOR, body: { status_code: "transferred", event_date: "2099-01-01" } });
     expect(r.status).toBe(400);
     expect((await json(await call("GET", "/api/members", { as: EDITOR }))).some((x: any) => x.id === m.id)).toBe(true);
+  });
+});
+
+describe("birth date and first title from the sheet; CSV import", () => {
+  beforeEach(resetDb);
+  const detail = async (code: string) => {
+    const m = (await json(await call("GET", "/api/members?include_inactive=1", { as: EDITOR }))).find((x: any) => x.member_code === code);
+    return json(await call("GET", `/api/registry/members/${m.id}`, { as: PASTOR }));
+  };
+
+  it("stores birth date; the sheet's 직분 becomes the first title (집사 = 서리집사 for this year)", async () => {
+    const year = todayInHobart().slice(0, 4);
+    const r = await json(await sync({ people: [
+      person("P-1", "가", { birth_date: "1960-05-01", title: "장로" }),
+      person("P-2", "나", { title: "집사" }),
+      person("P-3", "다", { title: "목자" }),
+    ] }));
+    expect(r).toMatchObject({ created: 3, unknown_titles: ["목자"] });
+    const a = await detail("P-1");
+    expect(a).toMatchObject({ birth_date: "1960-05-01", current_title: "장로" });
+    expect(a.titles[0]).toMatchObject({ title_name: "장로", start_date: "2026-08-09", end_date: null });
+    const b = await detail("P-2");
+    expect(b.titles[0]).toMatchObject({ title_name: "서리집사", start_date: `${year}-01-01`, end_date: `${year}-12-31` });
+    expect((await detail("P-3")).titles).toHaveLength(0);
+  });
+
+  it("after the first title, the sheet's 직분 no longer changes anything; a blank birth date never erases one", async () => {
+    await sync({ people: [person("P-1", "가", { birth_date: "1960-05-01", title: "권사" })] });
+    const r = await json(await sync({ people: [person("P-1", "가", { birth_date: null, title: "장로" })] }));
+    expect(r).toMatchObject({ updated: 0, unchanged: 1 });
+    const a = await detail("P-1");
+    expect(a.birth_date).toBe("1960-05-01");
+    expect(a.titles.map((t: any) => t.title_name)).toEqual(["권사"]);
+  });
+
+  it("someone known without a title gets the sheet's title once", async () => {
+    await sync({ people: [person("P-1", "가")] });
+    expect(await json(await sync({ people: [person("P-1", "가", { title: "청년" })] }))).toMatchObject({ updated: 1 });
+    expect((await detail("P-1")).current_title).toBe("청년");
+  });
+
+  it("rejects impossible birth dates", async () => {
+    for (const d of ["1899-12-31", "2099-01-01", "1960-02-30", "01/05/1960"]) {
+      expect((await sync({ people: [person("P-1", "가", { birth_date: d })] })).status).toBe(400);
+    }
+  });
+
+  it("CSV import endpoint: pastor only, same rules, audited as the pastor", async () => {
+    const body = { people: [person("P-1", "가", { birth_date: "1990-01-01", title: "청년" })] };
+    expect((await call("POST", "/api/registry/import", { as: EDITOR, body })).status).toBe(403);
+    const r = await call("POST", "/api/registry/import", { as: PASTOR, body });
+    expect(await json(r)).toMatchObject({ created: 1 });
+    expect(await count("SELECT COUNT(*) AS n FROM audit_log WHERE user_email = ? AND table_name = 'members'", PASTOR)).toBe(1);
+    expect((await call("POST", "/api/registry/import", { as: PASTOR, body: { people: [person("P-2", "나", { 메모: "x" })] } })).status).toBe(400);
+  });
+
+  it("pending people keep their birth date and title when created or linked", async () => {
+    const old = await newMember("가");
+    await sync({ people: [person("P-1", "가", { birth_date: "1970-03-07", title: "권사" }), person("P-2", "나")] });
+    await newMember("나"); // now 나 from the sheet is known (P-2) — unaffected
+    await call("POST", "/api/registry/pending/P-1/link", { as: PASTOR, body: { member_id: old.id } });
+    const a = await detail("P-1");
+    expect(a).toMatchObject({ id: old.id, birth_date: "1970-03-07", current_title: "권사" });
   });
 });

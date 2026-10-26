@@ -403,6 +403,14 @@ const statusTag = (code) =>
   code ? h("span", { class: `tag ${LEFT_CODES.has(code) ? "void" : ""}` }, STATUS_LABELS[code] ?? code) : null;
 const titleTag = (t) => (t ? h("span", { class: "tag online" }, t) : null);
 // The church's year, not the phone's (they differ only when travelling, but it costs nothing).
+/** Age in full years on today's Hobart date, from YYYY-MM-DD. */
+function ageOf(birth) {
+  if (!birth) return null;
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Hobart" }).format(new Date());
+  const [y, m, d] = birth.split("-").map(Number);
+  const [ty, tm, td] = today.split("-").map(Number);
+  return ty - y - (tm < m || (tm === m && td < d) ? 1 : 0);
+}
 const thisYear = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Hobart", year: "numeric" }).format(new Date());
 
 async function renderRegistry() {
@@ -432,7 +440,7 @@ async function renderRegistry() {
             h("li", {},
               h("a", { class: "grow", href: `#registry/${m.id}`, style: "color:inherit;text-decoration:none" },
                 h("b", {}, m.name), " ", titleTag(m.current_title), " ", statusTag(m.current_status),
-                h("div", { class: "muted" }, [m.relation, m.member_code ? null : "직접 등록"].filter(Boolean).join(" · "))),
+                h("div", { class: "muted" }, [m.relation, m.birth_date ? `${ageOf(m.birth_date)}세` : null, m.member_code ? null : "직접 등록"].filter(Boolean).join(" · "))),
               h("span", { class: "muted shrink" }, "›")))
         : [h("li", { class: "muted" }, "해당하는 분이 없습니다.")]),
     );
@@ -496,6 +504,7 @@ async function renderRegistry() {
 
   paint(ticket,
     h("h2", {}, "교적부"),
+    importCard(() => Promise.all([load(), loadExpiring(), loadPending()])),
     pending,
     h("p", { class: "muted" }, "새가족은 목양 시트에서 자동으로 들어옵니다. 직분과 출석 상태는 여기에서 관리합니다."),
     expiring,
@@ -560,11 +569,12 @@ async function renderRegistryMember(ticket, id) {
     h("div", { class: "card" },
       h("ul", { class: "list" },
         h("li", {}, h("span", {}, "관계"), h("b", {}, m.relation ?? "-")),
+        h("li", {}, h("span", {}, "생년월일"), h("b", {}, m.birth_date ? `${m.birth_date} (${ageOf(m.birth_date)}세)` : "-")),
         h("li", {}, h("span", {}, "교인ID"), h("b", {}, m.member_code ?? "직접 등록")),
         h("li", {}, h("span", {}, "등록일"), h("b", {}, m.registered_on ?? "-")),
         m.family.length
           ? h("li", {}, h("span", {}, "가족"), h("span", { class: "grow", style: "text-align:right" },
-              m.family.flatMap((f, i) => [i ? ", " : "", h("a", { href: `#registry/${f.id}` }, `${f.name}${f.relation ? `(${f.relation})` : ""}`)])))
+              m.family.flatMap((f, i) => [i ? ", " : "", h("a", { href: `#registry/${f.id}` }, `${f.name}${f.relation ? `(${f.relation}${f.birth_date ? `, ${ageOf(f.birth_date)}세` : ""})` : ""}`)])))
           : null)),
     h("div", { class: "card" },
       h("h3", {}, "직분 이력"),
@@ -605,49 +615,143 @@ async function renderRegistryMember(ticket, id) {
   );
 }
 
+// ---------- 시트에서 가져오기 (CSV) ----------
+
+/** RFC 4180 CSV: quoted fields may contain commas, quotes ("") and line breaks (memo cells do). */
+function parseCsv(text) {
+  const rows = [];
+  let row = [], field = "", i = 0, quoted = false;
+  text = text.replace(/^\uFEFF/, "");
+  while (i < text.length) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
+        quoted = false; i++; continue;
+      }
+      field += ch; i++; continue;
+    }
+    if (ch === '"') { quoted = true; i++; continue; }
+    if (ch === ",") { row.push(field); field = ""; i++; continue; }
+    if (ch === "\r") { i++; continue; }
+    if (ch === "\n") { row.push(field); rows.push(row); row = []; field = ""; i++; continue; }
+    field += ch; i++;
+  }
+  if (field !== "" || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+/** "1960-05-01", "1960-05-01 14:30:51", "1960. 5. 1" -> "1960-05-01"; otherwise null. */
+function csvDate(v) {
+  const m = /^(\d{4})\s*[-./]\s*(\d{1,2})\s*[-./]\s*(\d{1,2})/.exec(String(v).trim());
+  return m ? `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}` : null;
+}
+
+// Only these columns are read. Everything else in the file (memo, prayer requests, address…) is ignored
+// in the browser and never sent.
+const CSV_COLUMNS = { member_code: "교인ID", family_code: "가정ID", name: "이름", relation: "관계", birth_date: "생년월일", title: "직분", registered_at: "등록일시", first_registered: "최초등록일" };
+
+function peopleFromCsv(text) {
+  const rows = parseCsv(text);
+  if (!rows.length) throw new Error("빈 파일입니다.");
+  const header = rows[0].map((v) => v.trim());
+  const col = Object.fromEntries(Object.entries(CSV_COLUMNS).map(([k, t]) => [k, header.indexOf(t)]));
+  if (col.member_code < 0 || col.name < 0) throw new Error("'교인ID'와 '이름' 열이 있는 교인목록 탭의 CSV인지 확인하세요.");
+  const used = Object.values(col).filter((i) => i >= 0).length;
+  const get = (r, k) => (col[k] >= 0 ? String(r[col[k]] ?? "").normalize("NFC").trim() : "");
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Hobart" }).format(new Date());
+  const people = [], skipped = [], noBirth = [];
+  rows.slice(1).forEach((r, i) => {
+    const code = get(r, "member_code"), name = get(r, "name");
+    if (!code && !name) return;
+    const family = get(r, "family_code"), relation = get(r, "relation"), title = get(r, "title");
+    const problem =
+      !/^[A-Za-z0-9-]{3,40}$/.test(code) ? "교인ID" :
+      family && !/^[A-Za-z0-9-]{3,40}$/.test(family) ? "가정ID" :
+      !name || name.length > 50 ? "이름" : relation.length > 20 ? "관계" : title.length > 20 ? "직분" : "";
+    if (problem) { skipped.push(`${i + 2}행(${problem})`); return; }
+    let birth = csvDate(get(r, "birth_date"));
+    if (birth && (birth < "1900-01-01" || birth > today || isNaN(Date.parse(birth)))) birth = null;
+    if (!birth && get(r, "birth_date")) noBirth.push(`${i + 2}행`);
+    const reg = csvDate(get(r, "first_registered")) || csvDate(get(r, "registered_at"));
+    people.push({
+      member_code: code, family_code: family || null, name, relation: relation || null,
+      birth_date: birth, title: title || null,
+      registered_on: reg && reg >= "2000-01-01" && reg <= "2100-12-31" ? reg : null,
+    });
+  });
+  return { people, skipped, noBirth, used, ignored: header.length - used };
+}
+
+function importCard(after) {
+  const file = h("input", { type: "file", accept: ".csv,text/csv", "aria-label": "CSV 파일" });
+  const out = h("div", { class: "muted" });
+  const go = h("button", { type: "button" }, "가져오기");
+  go.onclick = () =>
+    act(go, async () => {
+      const f = file.files?.[0];
+      if (!f) throw new Error("CSV 파일을 고르세요.");
+      const { people, skipped, noBirth, used, ignored } = peopleFromCsv(await f.text());
+      if (!people.length) throw new Error("가져올 사람이 없습니다.");
+      if (!confirm(`${people.length}명을 교적부로 가져옵니다.\n읽는 칸 ${used}개, 읽지 않고 버리는 칸 ${ignored}개.\n계속할까요?`)) return;
+      const total = { created: 0, updated: 0, pending: 0, unchanged: 0, unknown: new Set() };
+      for (let i = 0; i < people.length; i += 100) {
+        const r = await api("POST", "/api/registry/import", { people: people.slice(i, i + 100) });
+        total.created += r.created; total.updated += r.updated; total.pending += r.pending; total.unchanged += r.unchanged;
+        r.unknown_titles.forEach((t) => total.unknown.add(t));
+      }
+      out.replaceChildren(...[
+        h("div", {}, `새로 등록 ${total.created}명 · 변경 ${total.updated}명 · 그대로 ${total.unchanged}명${total.pending ? ` · 확인 필요 ${total.pending}명` : ""}`),
+        skipped.length ? h("div", {}, `형식이 맞지 않아 건너뛴 줄: ${skipped.join(", ")}`) : null,
+        noBirth.length ? h("div", {}, `생년월일을 읽지 못한 줄 (나머지는 가져옴): ${noBirth.join(", ")}`) : null,
+        total.unknown.size ? h("div", {}, `목록에 없는 직분이라 기록하지 않음: ${[...total.unknown].join(", ")}`) : null,
+      ].filter(Boolean));
+      file.value = "";
+      toast("가져왔습니다.");
+      await after();
+    });
+  return h("details", { class: "card registry-only" },
+    h("summary", {}, h("b", {}, "목양 시트에서 가져오기 (CSV)")),
+    h("p", { class: "muted mt" }, "시트의 '교인목록' 탭에서 [파일] → [다운로드] → [CSV]로 받은 파일을 고르세요. 교인ID·가정ID·이름·관계·생년월일·직분·등록일만 읽고, 메모·기도제목·주소 등 나머지 칸은 이 화면에서 버려져 서버로 가지 않습니다. 여러 번 가져와도 중복되지 않습니다."),
+    h("div", { class: "row" }, file, h("div", { class: "shrink" }, go)),
+    out);
+}
+
 function titlesCard() {
-  const list = h("ul", { class: "list" });
+  // The title list is fixed for this church; only shown here. Titles are given to people in 교적부.
+  const list = h("div", { class: "chips" });
   const load = async () => {
     const rows = await api("GET", "/api/registry/titles");
-    list.replaceChildren(...rows.map((t) =>
-      h("li", {},
-        h("div", { class: "grow" }, t.name, t.term_limited ? h("span", { class: "tag" }, " 1년 임기") : "", t.is_active ? "" : h("span", { class: "tag void" }, " 사용 중지")),
-        h("div", { class: "registry-only row shrink" },
-          h("button", { type: "button", class: "secondary small", onclick: (e) =>
-            act(e.currentTarget, async () => { await api("PATCH", `/api/registry/titles/${t.id}`, { term_limited: !t.term_limited }); await load(); }) },
-            t.term_limited ? "임기 없음으로" : "1년 임기로"),
-          h("button", { type: "button", class: "danger small", onclick: (e) =>
-            act(e.currentTarget, async () => { await api("PATCH", `/api/registry/titles/${t.id}`, { is_active: !t.is_active }); await load(); }) },
-            t.is_active ? "사용 중지" : "다시 사용")))));
+    list.replaceChildren(...rows.filter((t) => t.is_active).map((t) =>
+      h("div", { class: "chip-item" }, h("span", { class: "grow" }, t.name), t.term_limited ? h("span", { class: "tag" }, "1년 임기") : null)));
   };
-  const input = h("input", { placeholder: "새 직분 이름", maxlength: 50 });
-  const add = h("button", { type: "button", class: "shrink" }, "추가");
-  add.onclick = () => act(add, async () => { await api("POST", "/api/registry/titles", { name: input.value }); input.value = ""; await load(); });
-  const card = h("div", { class: "card" }, h("h3", {}, "직분 목록"), list, h("div", { class: "row mt registry-only" }, input, add));
+  const card = h("div", { class: "card" }, h("h3", {}, "직분"), list,
+    h("p", { class: "muted mt" }, "직분은 교적부에서 각 교인에게 기록합니다. 서리집사는 1년 임기로, 종료일이 그해 12월 31일로 자동 입력됩니다."));
   return { card, load };
 }
 
 // ---------- 설정 ----------
 
 function lookupCard(title, path) {
-  const list = h("ul", { class: "list" });
+  // Compact: items flow in a grid (2+ per row on wider screens) with small inline actions.
+  const list = h("div", { class: "chips" });
   const load = async () => {
     const rows = await api("GET", `${path}?include_inactive=1`);
     list.replaceChildren(
       ...(rows.length
         ? rows.map((r) =>
-            h("li", {},
-              h("div", { class: "grow" }, r.name, r.is_active ? "" : h("span", { class: "tag void" }, " 사용 중지")),
-              h("div", { class: "editor-only row shrink" },
-                h("button", { type: "button", class: "secondary small", onclick: (e) => {
+            h("div", { class: `chip-item ${r.is_active ? "" : "off"}` },
+              h("span", { class: "grow" }, r.name, r.is_active ? "" : h("span", { class: "muted" }, " (중지)")),
+              h("span", { class: "editor-only" },
+                h("button", { type: "button", class: "mini", title: "이름 변경", onclick: (e) => {
                   const name = prompt("새 이름", r.name);
                   if (name === null) return;
                   act(e.currentTarget, async () => { await api("PATCH", `${path}/${r.id}`, { name }); await load(); });
-                } }, "이름 변경"),
-                h("button", { type: "button", class: "danger small", onclick: (e) =>
+                } }, "변경"),
+                h("button", { type: "button", class: "mini danger-text", onclick: (e) =>
                   act(e.currentTarget, async () => { await api("PATCH", `${path}/${r.id}`, { is_active: !r.is_active }); await load(); }) },
-                  r.is_active ? "사용 중지" : "다시 사용"))))
-        : [h("li", { class: "muted" }, "항목이 없습니다.")]),
+                  r.is_active ? "중지" : "사용"))))
+        : [h("p", { class: "muted" }, "항목이 없습니다.")]),
     );
   };
   const input = h("input", { placeholder: "새 항목 이름", maxlength: 50 });
