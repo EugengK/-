@@ -20,6 +20,9 @@ describe("schedule rules", () => {
     expect(occurrences({ rule: "weekly", weekday: 1, start_date: "2026-11-01" }, "2026-10-26", "2026-11-16")).toEqual(["2026-11-02", "2026-11-09", "2026-11-16"]);
     expect(occurrences({ rule: "fortnightly", anchor_date: "2026-11-06", start_date: "2026-10-01" }, "2026-10-20", "2026-11-30")).toEqual(["2026-10-23", "2026-11-06", "2026-11-20"]);
   });
+  it("leap year February", () => {
+    expect(occurrences({ rule: "monthly_day", day_of_month: 30, start_date: "2028-01-01" }, "2028-02-01", "2028-02-29")).toEqual(["2028-02-29"]);
+  });
   it("respects start and end dates", () => {
     expect(occurrences({ rule: "weekly", weekday: 0, start_date: "2026-11-08", end_date: "2026-11-22" }, "2026-11-01", "2026-12-31")).toEqual(["2026-11-08", "2026-11-15", "2026-11-22"]);
   });
@@ -61,12 +64,18 @@ describe("fixed costs (고정 지출)", () => {
     expect((await json(await call("GET", "/api/expenses/due", { as: PASTOR }))).items).toHaveLength(1);
   });
 
-  it("fills in missed dates from the last month as overdue", async () => {
-    await call("POST", "/api/recurring-expenses", { as: EDITOR, body: stipend });
+  it("never back-fills dates before the rule was added (earlier payments happened outside the app)", async () => {
+    await call("POST", "/api/recurring-expenses", { as: EDITOR, body: stipend }); // start date 40 days ago
     const due = await json(await call("GET", "/api/expenses/due", { as: EDITOR }));
-    expect(due.items.length).toBeGreaterThanOrEqual(1);
-    expect(due.items.every((i: any) => i.expense_date >= addDays(today, -31))).toBe(true);
-    expect(due.items.some((i: any) => i.overdue)).toBe(due.items.some((i: any) => i.expense_date < today));
+    expect(due.items.every((i: any) => i.expense_date >= today && !i.overdue)).toBe(true);
+  });
+
+  it("dates missed while nobody opened the app (since the rule was added) do show as overdue", async () => {
+    const rule = await json(await call("POST", "/api/recurring-expenses", { as: EDITOR, body: { ...weeklyRent, start_date: addDays(today, -30) } }));
+    await db.prepare("UPDATE recurring_expenses SET generate_from = ? WHERE id = ?").bind(addDays(today, -20), rule.id).run();
+    const due = await json(await call("GET", "/api/expenses/due", { as: EDITOR }));
+    expect(due.items.some((i: any) => i.overdue)).toBe(true);
+    expect(due.items.every((i: any) => i.expense_date >= addDays(today, -20))).toBe(true);
   });
 
   it("pay: planned -> confirmed with the actual amount; cannot pay twice; viewer cannot pay", async () => {
@@ -88,15 +97,50 @@ describe("fixed costs (고정 지출)", () => {
     expect(await count("SELECT COUNT(*) AS n FROM expenses")).toBe(1);
   });
 
-  it("stopping a rule stops new dates; changing the amount applies to new dates only", async () => {
-    const rule = await json(await call("POST", "/api/recurring-expenses", { as: EDITOR, body: { ...weeklyRent, start_date: addDays(today, -30) } }));
+  it("paying on a different day never brings the scheduled date back", async () => {
+    await call("POST", "/api/recurring-expenses", { as: EDITOR, body: weeklyRent });
+    const [item] = (await json(await call("GET", "/api/expenses/due", { as: EDITOR }))).items;
+    await call("POST", `/api/expenses/${item.id}/pay`, { as: EDITOR, body: { expense_date: today } });
+    expect(await generatePlanned(db)).toBe(0);
+    expect((await json(await call("GET", "/api/expenses/due", { as: EDITOR }))).items).toHaveLength(0);
+    expect(await count("SELECT COUNT(*) AS n FROM expenses")).toBe(1);
+  });
+
+  it("a skipped row cannot be paid", async () => {
+    await call("POST", "/api/recurring-expenses", { as: EDITOR, body: weeklyRent });
+    const [item] = (await json(await call("GET", "/api/expenses/due", { as: EDITOR }))).items;
+    await call("POST", `/api/expenses/${item.id}/void`, { as: EDITOR, body: { reason: "x" } });
+    expect((await call("POST", `/api/expenses/${item.id}/pay`, { as: EDITOR, body: {} })).status).toBe(409);
+  });
+
+  it("stopping a rule cancels its unpaid planned rows; restarting does not back-fill the pause", async () => {
+    const rule = await json(await call("POST", "/api/recurring-expenses", { as: EDITOR, body: weeklyRent }));
     await call("GET", "/api/expenses/due", { as: EDITOR });
-    const before = await count("SELECT COUNT(*) AS n FROM expenses");
-    await db.prepare("DELETE FROM expenses WHERE expense_date > ?").bind(today).run(); // pretend the future ones weren't made yet
     await call("PATCH", `/api/recurring-expenses/${rule.id}`, { as: EDITOR, body: { is_active: false } });
-    await call("GET", "/api/expenses/due", { as: EDITOR });
-    expect(await count("SELECT COUNT(*) AS n FROM expenses WHERE expense_date > ?", today)).toBe(0);
-    expect(before).toBeGreaterThan(0);
+    expect((await json(await call("GET", "/api/expenses/due", { as: EDITOR }))).items).toHaveLength(0);
+    expect(await count("SELECT COUNT(*) AS n FROM expenses WHERE status = 'void' AND void_reason LIKE '%중지%'")).toBe(1);
+    // Pretend it was paused for three weeks, then switched back on.
+    await db.prepare("UPDATE recurring_expenses SET generate_from = ? WHERE id = ?").bind(addDays(today, -21), rule.id).run();
+    await call("PATCH", `/api/recurring-expenses/${rule.id}`, { as: EDITOR, body: { is_active: true } });
+    const due = await json(await call("GET", "/api/expenses/due", { as: EDITOR }));
+    expect(due.items.every((i: any) => i.expense_date >= today)).toBe(true);
+  });
+
+  it("an earlier end date cancels planned rows after it", async () => {
+    const rule = await json(await call("POST", "/api/recurring-expenses", { as: EDITOR, body: { ...weeklyRent, rule: "weekly", weekday: new Date(`${today}T00:00:00Z`).getUTCDay() } }));
+    await call("GET", "/api/expenses/due", { as: EDITOR }); // today and today+7
+    expect(await count("SELECT COUNT(*) AS n FROM expenses WHERE status = 'planned'")).toBe(2);
+    await call("PATCH", `/api/recurring-expenses/${rule.id}`, { as: EDITOR, body: { end_date: today } });
+    expect(await count("SELECT COUNT(*) AS n FROM expenses WHERE status = 'planned'")).toBe(1);
+  });
+
+  it("summary keeps paid and planned apart", async () => {
+    await call("POST", "/api/recurring-expenses", { as: EDITOR, body: weeklyRent });
+    const [item] = (await json(await call("GET", "/api/expenses/due", { as: EDITOR }))).items;
+    const s = await json(await call("GET", `/api/expenses/summary?from=${addDays(today, -1)}&to=${addDays(today, 8)}`, { as: PASTOR }));
+    expect(s).toMatchObject({ paid_cents: 0, planned_cents: 15000 });
+    await call("POST", `/api/expenses/${item.id}/pay`, { as: EDITOR, body: {} });
+    expect(await json(await call("GET", `/api/expenses/summary?from=${addDays(today, -1)}&to=${addDays(today, 8)}`, { as: PASTOR }))).toMatchObject({ paid_cents: 15000, planned_cents: 0 });
   });
 });
 

@@ -446,40 +446,53 @@ async function voidExpense(btn, e, after) {
   });
 }
 
+/** Re-draws the 지출 tab if it is the one on screen (after something changed elsewhere). */
+const refreshExpensesTab = () => { if (currentTab() === "expenses") renderExpenses(); };
+
 /** Opens once a day for finance editors: fixed costs due this week (and any overdue). */
 async function remindDue() {
   if (!isEditor()) return;
-  const key = `due-reminder-${new Date().toDateString()}`;
-  try { if (localStorage.getItem(key)) return; } catch { /* storage blocked: just remind */ }
   let due;
   try { due = await api("GET", "/api/expenses/due"); } catch { return; }
+  refreshExpensesTab(); // the call above may have just added this week's planned rows
   if (!due.items.length) return;
-  try { localStorage.setItem(key, "1"); } catch { /* ignore */ }
+  const key = `due-reminder-${new Date().toDateString()}`;
+  try { if (localStorage.getItem(key)) return; localStorage.setItem(key, "1"); } catch { /* storage blocked: just remind */ }
+
   const dlg = h("dialog", { class: "ask" });
-  const close = () => { dlg.close(); dlg.remove(); };
+  const close = () => { dlg.close(); dlg.remove(); refreshExpensesTab(); };
+  dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(); });
   const list = h("ul", { class: "list" });
+  // Pay/skip open their own dialog, so this one steps aside and comes back with what is left.
+  const handle = async (action, btn, e) => {
+    dlg.close();
+    await action(btn, e, async () => {});
+    try {
+      const fresh = await api("GET", "/api/expenses/due");
+      if (!fresh.items.length) return close();
+      fill(fresh.items);
+      dlg.showModal();
+    } catch (err) {
+      toast(err.message, true);
+      close();
+    }
+  };
   const fill = (items) =>
     list.replaceChildren(...items.map((e) =>
-      h("li", {},
+      h("li", { style: "flex-wrap:wrap" },
         h("div", { class: "grow" },
           h("b", {}, e.recurring_name ?? e.vendor), " ", accountTag(e.account),
           h("div", { class: e.overdue ? "" : "muted", style: e.overdue ? "color:var(--danger)" : "" },
-            `${e.expense_date}${e.overdue ? " · 지났음" : ""} · ${money(e.total_cents)}`)),
-        h("button", { type: "button", class: "small", onclick: async (ev) => {
-          const btn = ev.currentTarget;
-          dlg.close();
-          await payPlanned(btn, e, async () => {});
-          const fresh = await api("GET", "/api/expenses/due");
-          if (!fresh.items.length) return close();
-          fill(fresh.items);
-          dlg.showModal();
-        } }, "지급 완료"))));
+            `${e.expense_date}${e.overdue ? " · 날짜 지남" : ""} · ${money(e.total_cents)}`)),
+        h("span", { class: "row shrink" },
+          h("button", { type: "button", class: "mini danger-text", onclick: (ev) => handle(voidExpense, ev.currentTarget, e) }, "건너뛰기"),
+          h("button", { type: "button", class: "small", onclick: (ev) => handle(payPlanned, ev.currentTarget, e) }, "지급 완료")))));
   fill(due.items);
   dlg.append(
     h("h3", {}, "이번 주 고정 지출"),
-    h("p", { class: "muted" }, "지급했으면 '지급 완료'를 누르세요. 자동이체도 실제로 나갔는지 확인한 뒤 누르시면 됩니다."),
+    h("p", { class: "muted" }, "지급했으면 '지급 완료'를 누르세요. 자동이체도 실제로 나갔는지 확인한 뒤 누르시면 됩니다. 이번에는 내지 않는 경우 '건너뛰기'를 누르세요."),
     list,
-    h("div", { class: "row mt" }, h("button", { type: "button", class: "secondary", onclick: () => { close(); location.hash = "#expenses"; } }, "지출 탭에서 보기"), h("button", { type: "button", onclick: close }, "닫기")),
+    h("div", { class: "row mt" }, h("button", { type: "button", class: "secondary", onclick: () => { close(); location.hash = "#expenses"; } }, "지출 탭에서 보기"), h("button", { type: "button", onclick: close }, "나중에")),
   );
   document.body.append(dlg);
   dlg.showModal();
@@ -502,15 +515,15 @@ async function renderExpenses() {
     out.replaceChildren(...[
       h("div", { class: "card" },
         h("div", { class: "totals" },
-          h("div", { class: "stat" }, h("b", {}, money(sum.paid_cents)), h("span", {}, "지급")),
-          h("div", { class: "stat" }, h("b", {}, money(sum.planned_cents)), h("span", {}, "예정 (고정)")),
-          h("div", { class: "stat" }, h("b", {}, money(sum.paid_cents + sum.planned_cents)), h("span", {}, "합계")))),
+          h("div", { class: "stat" }, h("b", {}, money(sum.paid_cash_cents)), h("span", {}, "지급 (현금)")),
+          h("div", { class: "stat" }, h("b", {}, money(sum.paid_bank_cents)), h("span", {}, "지급 (은행)")),
+          h("div", { class: "stat planned" }, h("b", {}, money(sum.planned_cents)), h("span", {}, "예정 (아직 안 나감)")))),
       h("div", { class: "card" },
         h("h3", {}, `지출 목록 (${rows.length}건)`),
         rows.length
           ? h("table", {}, h("tbody", {}, rows.map((e) =>
-              h("tr", {},
-                h("td", {}, e.expense_date, h("br"), h("span", { class: `tag ${e.status === "planned" ? "cash" : ""}` }, EXPENSE_STATUS[e.status])),
+              h("tr", { class: e.status === "planned" ? "planned-row" : "" },
+                h("td", {}, e.expense_date, h("br"), h("span", { class: `tag ${e.status === "planned" ? "planned" : ""}` }, EXPENSE_STATUS[e.status])),
                 h("td", {}, e.recurring_name ? h("b", {}, e.recurring_name) : e.vendor, " ", accountTag(e.account),
                   e.recurring_name && e.vendor !== e.recurring_name ? h("div", { class: "muted" }, e.vendor) : null,
                   [e.department_name, e.category_name].some(Boolean) ? h("div", { class: "muted" }, [e.department_name, e.category_name].filter(Boolean).join(" · ")) : null,

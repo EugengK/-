@@ -71,3 +71,6 @@ details > summary { cursor: pointer; list-style: revert; }
 dialog.ask { border: 0; border-radius: 12px; padding: 18px; width: min(420px, calc(100vw - 32px)); box-shadow: 0 10px 40px rgba(0,0,0,.25); }
 dialog.ask::backdrop { background: rgba(15, 23, 42, .45); }
 .ask-msg { white-space: pre-line; margin: 0 0 12px; }
+.tag.planned { background: #fff; color: #7c5a00; border: 1px dashed #c9a227; }
+.stat.planned { background: #fff; border: 1px dashed #c9a227; }
+tr.planned-row td { color: #5b6270; font-style: italic; }

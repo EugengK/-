@@ -22,6 +22,7 @@ interface RecurringRow extends Rule {
   category_id: number | null;
   note: string | null;
   is_active: number;
+  generate_from: string | null;
 }
 
 const ruleFields = {
@@ -98,10 +99,13 @@ recurringRoutes.post("/", async (c) => {
       db
         .prepare(
           `INSERT INTO recurring_expenses (name, vendor, amount_cents, account, department_id, category_id, rule, day_of_month,
-             nth, weekday, anchor_date, start_date, end_date, note, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             nth, weekday, anchor_date, start_date, end_date, note, generate_from, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(row.name, row.vendor, row.amount_cents, row.account, row.department_id, row.category_id, row.rule,
-          row.day_of_month, row.nth, row.weekday, row.anchor_date, row.start_date, row.end_date, row.note, user.id),
+          row.day_of_month, row.nth, row.weekday, row.anchor_date, row.start_date, row.end_date, row.note,
+          // Never back-fill before today: earlier payments were made outside the app.
+          todayInHobart(), user.id),
       db.prepare("SELECT * FROM recurring_expenses WHERE id = last_insert_rowid()"),
       auditStatement(db, user, "create", "recurring_expenses", "last_insert", undefined, row),
     ]);
@@ -128,13 +132,29 @@ recurringRoutes.patch("/:id{[0-9]+}", async (c) => {
     is_active: b.is_active === undefined ? before.is_active : b.is_active ? 1 : 0,
   };
   if (next.end_date && next.end_date < before.start_date) throw new HTTPException(400, { message: "종료일이 시작일보다 빠릅니다." });
-  await db.batch([
+  const restarted = before.is_active === 0 && next.is_active === 1;
+  // Restarting doesn't back-fill the paused weeks.
+  const generateFrom = restarted ? todayInHobart() : before.generate_from;
+  const user = c.get("user");
+  const statements = [
     db
-      .prepare("UPDATE recurring_expenses SET name = ?, vendor = ?, amount_cents = ?, account = ?, end_date = ?, note = ?, is_active = ? WHERE id = ?")
-      .bind(next.name, next.vendor, next.amount_cents, next.account, next.end_date, next.note, next.is_active, id),
-    auditStatement(db, c.get("user"), "update", "recurring_expenses", id, before, next),
-  ]);
-  return c.json(recurringOut({ ...before, ...next }));
+      .prepare("UPDATE recurring_expenses SET name = ?, vendor = ?, amount_cents = ?, account = ?, end_date = ?, note = ?, is_active = ?, generate_from = ? WHERE id = ?")
+      .bind(next.name, next.vendor, next.amount_cents, next.account, next.end_date, next.note, next.is_active, generateFrom, id),
+    auditStatement(db, user, "update", "recurring_expenses", id, before, { ...next, generate_from: generateFrom }),
+  ];
+  // Stopped, or ended earlier: unpaid 'planned' rows that no longer apply are cancelled (kept, with a reason).
+  if (next.is_active === 0 || next.end_date) {
+    statements.push(
+      db
+        .prepare(
+          `UPDATE expenses SET status = 'void', void_reason = ? WHERE recurring_id = ? AND status = 'planned'
+           AND (? = 0 OR scheduled_date > ?)`,
+        )
+        .bind(next.is_active === 0 ? "고정 지출 중지로 자동 취소" : "고정 지출 종료일 이후라 자동 취소", id, next.is_active, next.end_date ?? "9999-12-31"),
+    );
+  }
+  await db.batch(statements);
+  return c.json(recurringOut({ ...before, ...next, generate_from: generateFrom }));
 });
 
 /** Days ahead that fixed costs are put on the list (and shown in the reminder). */
@@ -155,21 +175,30 @@ export async function generatePlanned(db: D1Database, today = todayInHobart()): 
     .first<Omit<AppUser, "registry_admin">>();
   if (!system) throw new HTTPException(500, { message: "고정 지출 계정이 없습니다." });
   const actor: AppUser = { ...system, registry_admin: false };
-  const from = addDays(today, -LOOKBACK_DAYS);
+  const windowFrom = addDays(today, -LOOKBACK_DAYS);
   const to = addDays(today, LOOKAHEAD_DAYS);
+  // Dates already on the list (planned, paid or skipped) are left alone. Selecting them first keeps
+  // the write batch to the genuinely new dates, so opening the app stays cheap as rules accumulate.
+  const { results: existing } = await db
+    .prepare("SELECT recurring_id, scheduled_date FROM expenses WHERE recurring_id IS NOT NULL AND scheduled_date BETWEEN ? AND ?")
+    .bind(windowFrom, to)
+    .all<{ recurring_id: number; scheduled_date: string }>();
+  const have = new Set(existing.map((e) => `${e.recurring_id}|${e.scheduled_date}`));
   const statements: D1PreparedStatement[] = [];
   for (const r of rules) {
+    const from = r.generate_from && r.generate_from > windowFrom ? r.generate_from : windowFrom;
     for (const d of occurrences(r, from, to)) {
+      if (have.has(`${r.id}|${d}`)) continue;
       const row = { expense_date: d, vendor: r.vendor || r.name, total_cents: r.amount_cents, account: r.account, recurring_id: r.id };
       // INSERT OR IGNORE: already there (planned, paid or skipped) -> nothing happens, and the
       // audit row below is only written when this insert actually added a row.
       statements.push(
         db
           .prepare(
-            `INSERT OR IGNORE INTO expenses (expense_date, vendor, department_id, category_id, total_cents, account, note, status, recurring_id, created_by)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)`,
+            `INSERT OR IGNORE INTO expenses (expense_date, scheduled_date, vendor, department_id, category_id, total_cents, account, note, status, recurring_id, created_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)`,
           )
-          .bind(d, row.vendor, r.department_id, r.category_id, r.amount_cents, r.account, `고정 지출: ${r.name}`, r.id, actor.id),
+          .bind(d, d, row.vendor, r.department_id, r.category_id, r.amount_cents, r.account, `고정 지출: ${r.name}`, r.id, actor.id),
         auditStatement(db, actor, "create", "expenses", "last_insert", undefined, row, true),
       );
     }
@@ -194,7 +223,7 @@ interface ExpenseRow {
 
 const SELECT = `SELECT e.id, e.expense_date, e.vendor, e.department_id, d.name AS department_name, e.category_id,
   c.name AS category_name, e.total_cents, e.gst_cents, e.account, e.paid_by, e.note, e.status, e.void_reason,
-  e.recurring_id, r.name AS recurring_name, e.created_at
+  e.recurring_id, r.name AS recurring_name, e.scheduled_date, e.created_at
   FROM expenses e LEFT JOIN departments d ON d.id = e.department_id LEFT JOIN expense_categories c ON c.id = e.category_id
   LEFT JOIN recurring_expenses r ON r.id = e.recurring_id`;
 
@@ -299,8 +328,6 @@ expenseRoutes.post("/:id{[0-9]+}/pay", async (c) => {
     ]);
     if (u!.meta.changes === 0) throw new HTTPException(409, { message: "이미 처리된 항목입니다." });
   } catch (err) {
-    // Moving the date onto another planned date of the same fixed cost would duplicate it.
-    if (err instanceof Error && /UNIQUE/i.test(err.message)) throw new HTTPException(409, { message: "그 날짜에는 이미 같은 고정 지출이 있습니다." });
     throw err;
   }
   return c.json({ ...before, ...next });
