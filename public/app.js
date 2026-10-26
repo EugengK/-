@@ -66,7 +66,14 @@ async function api(method, path, body) {
     init.headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(body ?? {});
   }
-  const res = await fetch(path, init);
+  // Never leave the screen stuck on "불러오는 중…" if the server stops answering.
+  init.signal = AbortSignal.timeout(20000);
+  let res;
+  try {
+    res = await fetch(path, init);
+  } catch (err) {
+    throw new Error(err?.name === "TimeoutError" ? "서버가 응답하지 않습니다. 서버가 켜져 있는지 확인하세요." : "서버에 연결할 수 없습니다. 서버가 켜져 있는지 확인하세요.");
+  }
   let data = null;
   try {
     data = await res.json();
@@ -90,6 +97,20 @@ async function act(button, fn) {
 }
 
 const isEditor = () => state.me?.role === "editor";
+
+function currentTab() {
+  const t = location.hash.slice(1);
+  return t in routes ? t : isEditor() ? "entry" : "offerings";
+}
+/**
+ * Every screen render takes a ticket; only the newest one may draw. A slow, older render (e.g. the
+ * refresh after a save) then can't overwrite a screen the user has since opened or started typing in.
+ */
+let renderTicket = 0;
+const newTicket = () => ++renderTicket;
+function paint(ticket, ...children) {
+  if (ticket === renderTicket) view.replaceChildren(...children);
+}
 const methodTag = (m) => h("span", { class: `tag ${m}` }, m === "cash" ? "현금" : "온라인");
 
 async function loadFunds() {
@@ -100,9 +121,38 @@ async function loadMembers() {
 }
 const memberLabel = (m) => (m.note ? `${m.name} (${m.note})` : m.name);
 
+/**
+ * Unique text for each member in the giver list. When two people share a name, every one of them
+ * gets a distinguishing label (note, or #id), so typing the bare name is never silently one of them.
+ */
+function memberChoices() {
+  const byName = new Map();
+  for (const m of state.members) byName.set(m.name, (byName.get(m.name) ?? 0) + 1);
+  const raw = state.members.map((m) => ({
+    id: m.id,
+    name: m.name,
+    label: byName.get(m.name) > 1 ? (m.note ? `${m.name} (${m.note})` : `${m.name} #${m.id}`) : m.name,
+  }));
+  const byLabel = new Map();
+  for (const c of raw) byLabel.set(c.label, (byLabel.get(c.label) ?? 0) + 1);
+  return raw.map((c) => (byLabel.get(c.label) > 1 ? { ...c, label: `${c.label} #${c.id}` } : c));
+}
+
+/** Typed giver text -> { id } (id null = blank) or { error }. Accepts a list choice or a unique bare name. */
+function resolveGiver(text, choices) {
+  const t = text.normalize("NFC").trim();
+  if (!t) return { id: null };
+  const exact = choices.find((c) => c.label === t);
+  if (exact) return { id: exact.id };
+  const sameName = choices.filter((c) => c.name === t);
+  if (sameName.length === 1) return { id: sameName[0].id };
+  if (sameName.length > 1) return { error: `'${t}' 이름이 ${sameName.length}명 있습니다. 목록에서 정확히 골라 주세요.` };
+  return { error: `'${t}'은(는) 성도 명부에 없습니다. 목록에서 고르거나 '성도' 탭에서 먼저 추가하세요.` };
+}
+
 // ---------- 헌금 입력 ----------
 
-function lineEditor(onChange) {
+function lineEditor(onChange, choices) {
   const line = { method: "cash" };
   const fund = h(
     "select",
@@ -110,12 +160,8 @@ function lineEditor(onChange) {
     state.funds.map((f) => h("option", { value: f.id }, f.name)),
   );
   const amount = h("input", { inputmode: "decimal", placeholder: "0.00", "aria-label": "금액", oninput: onChange });
-  const member = h(
-    "select",
-    { "aria-label": "성도", onchange: onChange },
-    h("option", { value: "" }, "(무기명)"),
-    state.members.map((m) => h("option", { value: m.id }, memberLabel(m))),
-  );
+  // Type a few letters and pick from the list; left blank = anonymous (confirmed on save).
+  const member = h("input", { list: "giver-list", placeholder: "이름 입력 (비우면 무기명)", "aria-label": "성도", autocomplete: "off" });
   const note = h("input", { placeholder: "메모 (선택)", "aria-label": "메모", maxlength: 300 });
   const cashBtn = h("button", { type: "button", class: "on" }, "현금");
   const onlineBtn = h("button", { type: "button" }, "온라인");
@@ -147,11 +193,13 @@ function lineEditor(onChange) {
     focus: () => amount.focus(),
     cents: () => toCents(amount.value),
     isBlank: () => amount.value.trim() === "",
+    giver: () => resolveGiver(member.value, choices),
+    focusGiver: () => member.focus(),
     value: () => ({
       fund_type_id: Number(fund.value),
       amount_cents: toCents(amount.value),
       method: line.method,
-      member_id: member.value ? Number(member.value) : null,
+      member_id: resolveGiver(member.value, choices).id ?? null,
       note: note.value.trim() || undefined,
     }),
   });
@@ -160,13 +208,14 @@ function lineEditor(onChange) {
 
 /** keepDate: after a save, stay on the same date so a second batch for that day isn't misdated. */
 async function renderEntry(keepDate) {
+  const ticket = newTicket();
   if (!isEditor()) {
-    view.replaceChildren(h("h2", {}, "헌금 입력"), h("p", { class: "notice" }, "열람 권한으로 로그인되어 있어 입력할 수 없습니다. '헌금 내역'에서 확인하세요."));
+    paint(ticket, h("h2", {}, "헌금 입력"), h("p", { class: "notice" }, "열람 권한으로 로그인되어 있어 입력할 수 없습니다. '헌금 내역'에서 확인하세요."));
     return;
   }
   await Promise.all([loadFunds(), loadMembers()]);
   if (!state.funds.length) {
-    view.replaceChildren(h("h2", {}, "헌금 입력"), h("p", { class: "notice" }, "설정에서 헌금 종류를 먼저 추가하세요."));
+    paint(ticket, h("h2", {}, "헌금 입력"), h("p", { class: "notice" }, "설정에서 헌금 종류를 먼저 추가하세요."));
     return;
   }
   const lines = [];
@@ -188,8 +237,10 @@ async function renderEntry(keepDate) {
     totalOnline.textContent = money(online);
     totalAll.textContent = money(cash + online);
   };
+  const choices = memberChoices();
+  const giverList = h("datalist", { id: "giver-list" }, choices.map((c) => h("option", { value: c.label })));
   const addLine = () => {
-    const l = lineEditor(recalc);
+    const l = lineEditor(recalc, choices);
     l.removeBtn.onclick = () => {
       if (lines.length === 1) return;
       lines.splice(lines.indexOf(l), 1);
@@ -209,6 +260,23 @@ async function renderEntry(keepDate) {
       if (!filled.length) throw new Error("금액을 입력하세요.");
       const bad = lines.findIndex((l) => !l.isBlank() && (l.cents() === null || l.cents() <= 0));
       if (bad >= 0) throw new Error(`${bad + 1}번째 줄 금액이 올바르지 않습니다. (예: 20, 20.50, 1,200)`);
+      const anonymous = [];
+      for (const [i, l] of lines.entries()) {
+        if (l.isBlank()) continue;
+        const g = l.giver();
+        if (g.error) {
+          l.focusGiver();
+          throw new Error(`${i + 1}번째 줄: ${g.error}`);
+        }
+        if (g.id === null) anonymous.push(i);
+      }
+      if (anonymous.length) {
+        const nums = anonymous.map((i) => `${i + 1}번째`).join(", ");
+        if (!confirm(`${nums} 줄에 성도 이름이 없습니다.\n\n무기명으로 저장할까요?\n(이름을 넣으려면 '취소'를 누르세요.)`)) {
+          lines[anonymous[0]].focusGiver();
+          return;
+        }
+      }
       const entries = filled.map((l) => l.value());
       const total = entries.reduce((s, e) => s + e.amount_cents, 0);
       if (!confirm(`${date.value} 헌금 ${entries.length}건, 합계 ${money(total)}을 저장할까요?`)) return;
@@ -217,8 +285,9 @@ async function renderEntry(keepDate) {
       renderEntry(date.value);
     });
 
-  view.replaceChildren(
+  paint(ticket, 
     h("h2", {}, "헌금 입력"),
+    giverList,
     h("div", { class: "card" }, h("label", {}, "날짜"), date),
     list,
     h("button", { type: "button", class: "secondary", onclick: () => addLine().focus() }, "+ 줄 추가"),
@@ -238,6 +307,7 @@ async function renderEntry(keepDate) {
 // ---------- 헌금 내역 ----------
 
 async function renderOfferings() {
+  const ticket = newTicket();
   // Include stopped types so old offerings recorded under them can still be filtered.
   const allFunds = await api("GET", "/api/fund-types?include_inactive=1");
   const r = monthRange();
@@ -268,7 +338,7 @@ async function renderOfferings() {
       e[s.method] += s.total_cents;
       byFund.set(s.fund_type_id, e);
     }
-    out.replaceChildren(
+    out.replaceChildren(...[
       h("div", { class: "card" },
         h("div", { class: "totals" },
           h("div", { class: "stat" }, h("b", {}, money(sum.cash_cents)), h("span", {}, "현금")),
@@ -297,12 +367,12 @@ async function renderOfferings() {
                       : null)))))
           )
         : null,
-    );
+    ].filter(Boolean));
   };
   const reload = () => act(null, load);
   for (const el of [from, to, fund, showVoid]) el.addEventListener("change", reload);
 
-  view.replaceChildren(
+  paint(ticket, 
     h("h2", {}, "헌금 내역"),
     h("div", { class: "card" },
       h("div", { class: "row" }, h("div", {}, h("label", {}, "시작일"), from), h("div", {}, h("label", {}, "종료일"), to)),
@@ -326,6 +396,7 @@ function voidOffering(btn, o, after) {
 // ---------- 성도 ----------
 
 async function renderMembers() {
+  const ticket = newTicket();
   const q = h("input", { type: "search", placeholder: "이름 검색", "aria-label": "이름 검색" });
   const showInactive = h("input", { type: "checkbox", style: "width:auto;min-height:0" });
   const list = h("ul", { class: "list" });
@@ -367,7 +438,7 @@ async function renderMembers() {
       await load();
     });
 
-  view.replaceChildren(
+  paint(ticket, 
     h("h2", {}, "성도"),
     h("div", { class: "card editor-only" }, h("h3", {}, "성도 추가"), h("div", { class: "grid" }, name, phone, note, add)),
     h("div", { class: "card" },
@@ -482,6 +553,7 @@ function openingBalanceCard() {
 }
 
 async function renderSettings() {
+  const ticket = newTicket();
   const cards = [
     openingBalanceCard(),
     lookupCard("헌금 종류", "/api/fund-types"),
@@ -489,7 +561,7 @@ async function renderSettings() {
     lookupCard("지출 항목", "/api/expense-categories"),
   ];
   const s = state.settings;
-  view.replaceChildren(
+  paint(ticket, 
     h("h2", {}, "설정"),
     h("div", { class: "card" },
       h("h3", {}, "기본 정보"),
@@ -524,6 +596,7 @@ function describe(entry) {
 }
 
 async function renderAudit() {
+  const ticket = newTicket();
   const list = h("ul", { class: "list" });
   const more = h("button", { type: "button", class: "secondary mt" }, "더 보기");
   let lastId = 0;
@@ -539,7 +612,7 @@ async function renderAudit() {
     more.hidden = rows.length < 50;
   };
   more.onclick = () => act(more, load);
-  view.replaceChildren(h("h2", {}, "변경 기록"), h("p", { class: "muted" }, "누가, 언제, 무엇을 바꿨는지 모두 남습니다. 지울 수 없습니다."), h("div", { class: "card" }, list), more);
+  paint(ticket, h("h2", {}, "변경 기록"), h("p", { class: "muted" }, "누가, 언제, 무엇을 바꿨는지 모두 남습니다. 지울 수 없습니다."), h("div", { class: "card" }, list), more);
   await act(null, load);
 }
 
@@ -548,7 +621,7 @@ async function renderAudit() {
 const routes = { entry: renderEntry, offerings: renderOfferings, members: renderMembers, settings: renderSettings, audit: renderAudit };
 
 async function route() {
-  const tab = location.hash.slice(1) in routes ? location.hash.slice(1) : isEditor() ? "entry" : "offerings";
+  const tab = currentTab();
   for (const a of document.querySelectorAll(".tabs a")) a.classList.toggle("on", a.dataset.tab === tab);
   view.replaceChildren(h("p", { class: "muted" }, "불러오는 중…"));
   try {
