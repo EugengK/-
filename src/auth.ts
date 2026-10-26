@@ -18,6 +18,7 @@ export async function verifyAccessJwt(
       issuer: `https://${opts.teamDomain}`,
       audience: opts.aud,
       algorithms: ["RS256"],
+      requiredClaims: ["exp"],
     });
     const email = payload["email"];
     if (typeof email !== "string" || !email.includes("@")) return null;
@@ -72,7 +73,7 @@ export function authenticate(verify: TokenVerifier): MiddlewareHandler<AppEnv> {
 
 function isSameHost(origin: string, requestUrl: string): boolean {
   try {
-    return new URL(origin).host === new URL(requestUrl).host;
+    return new URL(origin).origin === new URL(requestUrl).origin;
   } catch {
     return false; // e.g. Origin: "null"
   }
@@ -95,8 +96,8 @@ export const guardWrites: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (origin !== undefined && !isSameHost(origin, c.req.url)) {
     return c.json({ error: "허용되지 않은 요청 출처입니다." }, 403);
   }
-  const type = c.req.header("Content-Type") ?? "";
-  if (!type.toLowerCase().startsWith("application/json")) {
+  const type = (c.req.header("Content-Type") ?? "").split(";")[0]!.trim().toLowerCase();
+  if (type !== "application/json") {
     return c.json({ error: "JSON 형식으로 요청해야 합니다." }, 415);
   }
   return next();

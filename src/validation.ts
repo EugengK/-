@@ -8,14 +8,20 @@ export function isRealDate(value: string): boolean {
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
 }
 
-export const isoDate = z.string().refine(isRealDate, "YYYY-MM-DD 형식의 실제 날짜여야 합니다.");
+export const isoDate = z
+  .string()
+  .refine((v) => isRealDate(v) && v >= "2000-01-01" && v <= "2100-12-31", "2000~2100년 사이의 실제 날짜(YYYY-MM-DD)여야 합니다.");
 
-export const name = z.string().trim().min(1, "이름을 입력하세요.").max(50, "50자 이하로 입력하세요.");
+// NFC so visually identical Hangul typed on different devices counts as one name.
+export const name = z.string().transform((v) => v.normalize("NFC")).pipe(z.string().trim().min(1, "이름을 입력하세요.").max(50, "50자 이하로 입력하세요."));
 
 /** Whole cents only; capped so JSON numbers stay exact. */
 export const cents = z.number().int("센트 단위 정수여야 합니다.").min(-1e11).max(1e11);
 
-export const reason = z.string().trim().min(1, "사유를 입력하세요.").max(300);
+export const reason = z
+  .string()
+  .transform((v) => v.normalize("NFC"))
+  .pipe(z.string().trim().min(1, "사유를 입력하세요.").max(300));
 
 export async function parseBody<S extends z.ZodType>(c: Context, schema: S): Promise<z.infer<S>> {
   let raw: unknown;

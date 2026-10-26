@@ -75,19 +75,32 @@ export function lookupRoutes(table: "fund_types" | "departments" | "expense_cate
       sort_order: body.sort_order ?? before.sort_order,
       is_active: body.is_active === undefined ? before.is_active : body.is_active ? 1 : 0,
     };
+    let applied: number;
     try {
-      await c.env.DB.batch([
-        c.env.DB.prepare(`UPDATE ${table} SET name = ?, sort_order = ?, is_active = ? WHERE id = ?`).bind(
+      // Only applies if the row still has the values we read, so a concurrent edit can't be
+      // silently overwritten (and the audit "before" is always accurate).
+      const [updated] = await c.env.DB.batch([
+        c.env.DB.prepare(
+          `UPDATE ${table} SET name = ?, sort_order = ?, is_active = ?
+           WHERE id = ? AND name = ? AND sort_order = ? AND is_active = ?`,
+        ).bind(
           next.name,
           next.sort_order,
           next.is_active,
           id,
+          before.name,
+          before.sort_order,
+          before.is_active,
         ),
-        auditStatement(c.env.DB, c.get("user"), "update", table, id, before, { id, ...next }),
+        auditStatement(c.env.DB, c.get("user"), "update", table, id, before, { id, ...next }, true),
       ]);
+      applied = updated!.meta.changes;
     } catch (err) {
       if (isUniqueViolation(err)) throw new HTTPException(409, { message: "이미 있는 이름입니다." });
       throw err;
+    }
+    if (applied === 0) {
+      throw new HTTPException(409, { message: "다른 사람이 먼저 수정했습니다. 새로고침 후 다시 시도하세요." });
     }
     return c.json({ id, name: next.name, sort_order: next.sort_order, is_active: next.is_active === 1 });
   });

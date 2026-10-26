@@ -65,7 +65,7 @@ CREATE UNIQUE INDEX budgets_unique_scope
 -- method: 'cash' goes to the cash account, 'online' to the bank account.
 CREATE TABLE offerings (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  offering_date TEXT NOT NULL CHECK (offering_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  offering_date TEXT NOT NULL CHECK (offering_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(offering_date) IS offering_date),
   fund_type_id  INTEGER NOT NULL REFERENCES fund_types (id),
   amount_cents  INTEGER NOT NULL CHECK (amount_cents > 0),
   method        TEXT NOT NULL CHECK (method IN ('cash', 'online')),
@@ -84,7 +84,7 @@ CREATE INDEX offerings_member ON offerings (member_id, offering_date);
 -- account: which church account paid ('cash' box or 'bank' account).
 CREATE TABLE expenses (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
-  expense_date   TEXT NOT NULL CHECK (expense_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  expense_date   TEXT NOT NULL CHECK (expense_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(expense_date) IS expense_date),
   vendor         TEXT NOT NULL,
   department_id  INTEGER NOT NULL REFERENCES departments (id),
   category_id    INTEGER REFERENCES expense_categories (id),
@@ -116,7 +116,7 @@ CREATE INDEX expense_items_expense ON expense_items (expense_id);
 CREATE TABLE opening_balances (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   account      TEXT NOT NULL CHECK (account IN ('cash', 'bank')),
-  as_of_date   TEXT NOT NULL CHECK (as_of_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  as_of_date   TEXT NOT NULL CHECK (as_of_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(as_of_date) IS as_of_date),
   amount_cents INTEGER NOT NULL,
   note         TEXT,
   status       TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'void')),

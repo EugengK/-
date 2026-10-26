@@ -35,8 +35,8 @@ settingsRoutes.get("/", async (c) => {
 
 export const auditRoutes = new Hono<AppEnv>();
 auditRoutes.get("/", async (c) => {
-  const limit = Math.min(Math.max(Number(c.req.query("limit") ?? 50) || 50, 1), 200);
-  const beforeId = Number(c.req.query("before_id") ?? 0) || 0;
+  const limit = Math.min(Math.max(Math.trunc(Number(c.req.query("limit") ?? 50)) || 50, 1), 200);
+  const beforeId = Math.trunc(Number(c.req.query("before_id") ?? 0)) || 0;
   const { results } = await c.env.DB.prepare(
     `SELECT id, at, user_id, user_email, action, table_name, row_id, before_json, after_json
      FROM audit_log ${beforeId ? "WHERE id < ?" : ""} ORDER BY id DESC LIMIT ?`,
