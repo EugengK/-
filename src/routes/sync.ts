@@ -40,7 +40,7 @@ export const peopleSchema = z.object({ people: z.array(personSchema).min(1).max(
 type Person = z.infer<typeof personSchema>;
 
 /** Sheet spellings that mean one of our titles. */
-const TITLE_ALIASES: Record<string, string> = { 집사: "서리집사" };
+const TITLE_ALIASES: Record<string, string> = { 집사: "서리집사", 시무장로: "장로", 시무권사: "권사" };
 
 interface Existing {
   id: number;
@@ -103,11 +103,18 @@ export async function applyPeople(db: D1Database, actor: AppUser, people: Person
   // Whole tables (church-sized) rather than IN (...): D1 caps bound values per query.
   const [known, unlinked, titled] = await db.batch([
     db.prepare("SELECT id, member_code, name, family_code, relation, birth_date FROM members WHERE member_code IS NOT NULL"),
-    db.prepare("SELECT name FROM members WHERE member_code IS NULL"),
+    db.prepare("SELECT id, name, birth_date, relation FROM members WHERE member_code IS NULL"),
     db.prepare("SELECT DISTINCT member_id FROM member_titles"),
   ]);
   const byCode = new Map((known!.results as unknown as Existing[]).map((k) => [k.member_code, k]));
-  const unlinkedNames = new Set((unlinked!.results as { name: string }[]).map((u) => u.name));
+  const unlinkedRows = unlinked!.results as { id: number; name: string; birth_date: string | null; relation: string | null }[];
+  const unlinkedNames = new Set(unlinkedRows.map((u) => u.name));
+  /** A hand-entered/roster person who is certainly this sheet row: same name AND same birth date, only one. */
+  const sureMatch = (name: string, birth: string | null) => {
+    if (!birth) return null;
+    const hits = unlinkedRows.filter((u) => u.name === name && u.birth_date === birth);
+    return hits.length === 1 ? hits[0]! : null;
+  };
   const hasTitle = new Set((titled!.results as { member_id: number }[]).map((t) => t.member_id));
   const resolveTitle = await loadTitles(db);
   const today = todayInHobart();
@@ -126,7 +133,20 @@ export async function applyPeople(db: D1Database, actor: AppUser, people: Person
     const cur = byCode.get(p.member_code);
     const registeredOn = p.registered_on ?? today;
 
-    if (!cur && unlinkedNames.has(next.name)) {
+    const sure = !cur ? sureMatch(next.name, next.birth_date) : null;
+    if (sure) {
+      // Same name and birth date: link the existing record to the sheet's 교인ID (keeps its history).
+      result.updated++;
+      unlinkedRows.splice(unlinkedRows.indexOf(sure), 1);
+      const after = { member_code: p.member_code, family_code: next.family_code, relation: next.relation ?? sure.relation };
+      statements.push(
+        db
+          .prepare("UPDATE members SET member_code = ?, family_code = ?, relation = ? WHERE id = ? AND member_code IS NULL")
+          .bind(after.member_code, after.family_code, after.relation, sure.id),
+        auditStatement(db, actor, "update", "members", sure.id, sure, after),
+      );
+      if (title && !hasTitle.has(sure.id)) statements.push(...firstTitleStatements(db, actor, p.member_code, title, registeredOn));
+    } else if (!cur && unlinkedNames.has(next.name)) {
       // Someone with this name was entered by hand: don't guess, let the pastor link or create.
       result.pending++;
       statements.push(
@@ -212,3 +232,115 @@ syncRoutes.post("/", async (c) => {
   if (!system) throw new HTTPException(500, { message: "연동 계정이 없습니다." });
   return c.json(await applyPeople(c.env.DB, { ...system, registry_admin: false }, body.people));
 });
+
+// ---------- 교인명부 (roster) ----------
+
+/**
+ * The church roster (구분, 직분/학년, 성명, 생년월일, 연락처 …) has no IDs. People are matched by
+ * name + birth date; a person with the same name but no birth date on either side is matched only
+ * when there is exactly one. Creates people without a 교인ID; the sheet sync links them later
+ * (same name and birth date). Never deletes or changes attendance.
+ */
+const rosterPersonSchema = z
+  .object({
+    name: text(50).pipe(z.string().min(1)),
+    birth_date: birthDate.nullable().optional(),
+    phone: text(30).nullable().optional(),
+    title: text(20).nullable().optional(),
+    note: text(100).nullable().optional(),
+  })
+  .strict();
+export const rosterSchema = z.object({ people: z.array(rosterPersonSchema).min(1).max(MAX_PEOPLE) }).strict();
+type RosterPerson = z.infer<typeof rosterPersonSchema>;
+
+export interface RosterResult {
+  created: number;
+  updated: number;
+  unchanged: number;
+  ambiguous: string[];
+  unknown_titles: string[];
+}
+
+export async function applyRoster(db: D1Database, actor: AppUser, people: RosterPerson[]): Promise<RosterResult> {
+  const [all, titled] = await db.batch([
+    db.prepare("SELECT id, name, birth_date, phone, member_code FROM members"),
+    db.prepare("SELECT DISTINCT member_id FROM member_titles"),
+  ]);
+  const members = all!.results as { id: number; name: string; birth_date: string | null; phone: string | null; member_code: string | null }[];
+  const hasTitle = new Set((titled!.results as { member_id: number }[]).map((t) => t.member_id));
+  const resolveTitle = await loadTitles(db);
+  const today = todayInHobart();
+  const result: RosterResult = { created: 0, updated: 0, unchanged: 0, ambiguous: [], unknown_titles: [] };
+  const statements: D1PreparedStatement[] = [];
+
+  for (const p of people) {
+    const birth = p.birth_date ?? null;
+    const phone = p.phone || null;
+    const { title, unknown } = resolveTitle(p.title);
+    if (unknown && !result.unknown_titles.includes(unknown)) result.unknown_titles.push(unknown);
+
+    const sameName = members.filter((m) => m.name === p.name);
+    const exact = birth ? sameName.filter((m) => m.birth_date === birth) : [];
+    const undated = sameName.filter((m) => m.birth_date === null);
+    let match: (typeof members)[number] | null = null;
+    let unsure = false;
+    if (birth) {
+      if (exact.length === 1) match = exact[0]!;
+      else if (exact.length > 1) unsure = true;
+      else if (undated.length === 1 && sameName.length === 1) match = undated[0]!; // fills in the birth date
+      else if (undated.length >= 1) unsure = true;
+      // else: same name, different birth date -> a different person
+    } else if (sameName.length === 1) match = sameName[0]!;
+    else if (sameName.length > 1) unsure = true;
+    if (unsure) {
+      result.ambiguous.push(p.name);
+      continue;
+    }
+    if (match) {
+      const next = { birth_date: match.birth_date ?? birth, phone: phone ?? match.phone };
+      const changed = next.birth_date !== match.birth_date || next.phone !== match.phone;
+      const addTitle = title && !hasTitle.has(match.id);
+      if (changed) {
+        statements.push(
+          db.prepare("UPDATE members SET birth_date = ?, phone = ? WHERE id = ?").bind(next.birth_date, next.phone, match.id),
+          auditStatement(db, actor, "update", "members", match.id, match, next),
+        );
+      }
+      if (addTitle) {
+        const year = today.slice(0, 4);
+        statements.push(
+          db
+            .prepare("INSERT INTO member_titles (member_id, title_id, start_date, end_date, note, created_by) VALUES (?, ?, ?, ?, '교인명부의 직분으로 처음 등록', ?)")
+            .bind(match.id, title.id, title.term_limited ? `${year}-01-01` : today, title.term_limited ? `${year}-12-31` : null, actor.id),
+          auditStatement(db, actor, "create", "member_titles", "last_insert", undefined, { member_id: match.id, title_name: title.name }),
+        );
+        hasTitle.add(match.id);
+      }
+      if (changed || addTitle) result.updated++;
+      else result.unchanged++;
+      continue;
+    }
+
+    result.created++;
+    const row = { name: p.name, birth_date: birth, phone, note: p.note || null };
+    members.push({ id: -1, name: p.name, birth_date: birth, phone, member_code: null }); // later rows see it
+    const year = today.slice(0, 4);
+    statements.push(
+      db.prepare("INSERT INTO members (name, birth_date, phone, note, registered_on) VALUES (?, ?, ?, ?, ?)").bind(row.name, row.birth_date, row.phone, row.note, today),
+      auditStatement(db, actor, "create", "members", "last_insert", undefined, row),
+      db
+        .prepare("INSERT INTO member_status_events (member_id, status_code, event_date, note, created_by) SELECT MAX(id), 'registered', ?, '교인명부에서 등록', ? FROM members")
+        .bind(today, actor.id),
+      ...(title
+        ? [
+            db
+              .prepare("INSERT INTO member_titles (member_id, title_id, start_date, end_date, note, created_by) SELECT MAX(id), ?, ?, ?, '교인명부의 직분으로 처음 등록', ? FROM members")
+              .bind(title.id, title.term_limited ? `${year}-01-01` : today, title.term_limited ? `${year}-12-31` : null, actor.id),
+            auditStatement(db, actor, "create", "member_titles", "last_insert", undefined, { member_name: p.name, title_name: title.name }),
+          ]
+        : []),
+    );
+  }
+  if (statements.length) await db.batch(statements);
+  return result;
+}

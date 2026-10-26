@@ -683,6 +683,39 @@ function peopleFromCsv(text) {
   return { people, skipped, noBirth, used, ignored: header.length - used };
 }
 
+/**
+ * The church roster (교인명부): 구분, 직분/학년, 성명, 성별, 생년월일, 만 나이, 연락처. No IDs.
+ * 주일학교 rows keep their grade as a note instead of a title.
+ */
+function peopleFromRoster(rows) {
+  const header = rows[0].map((v) => v.trim());
+  const idx = (t) => header.indexOf(t);
+  const c = { kind: idx("구분"), title: idx("직분/학년"), name: idx("성명"), birth: idx("생년월일"), phone: idx("연락처") };
+  const get = (r, i) => (i >= 0 ? String(r[i] ?? "").normalize("NFC").trim() : "");
+  const blank = (v) => (v === "-" ? "" : v);
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Hobart" }).format(new Date());
+  const people = [], skipped = [], noBirth = [];
+  rows.slice(1).forEach((r, i) => {
+    const name = get(r, c.name);
+    if (!name) return;
+    if (name.length > 50) { skipped.push(`${i + 2}행(성명)`); return; }
+    const kind = blank(get(r, c.kind)), sub = blank(get(r, c.title));
+    const school = kind === "주일학교";
+    let birth = csvDate(blank(get(r, c.birth)));
+    if (birth && (birth < "1900-01-01" || birth > today || isNaN(Date.parse(birth)))) birth = null;
+    if (!birth && blank(get(r, c.birth))) noBirth.push(`${i + 2}행`);
+    const title = school ? "" : sub || kind;
+    people.push({
+      name, birth_date: birth,
+      phone: blank(get(r, c.phone)).slice(0, 30) || null,
+      title: title.slice(0, 20) || null,
+      note: school ? `주일학교 ${sub}`.trim().slice(0, 100) : null,
+    });
+  });
+  const used = Object.values(c).filter((i) => i >= 0).length;
+  return { people, skipped, noBirth, used, ignored: header.length - used };
+}
+
 function importCard(after) {
   const file = h("input", { type: "file", accept: ".csv,text/csv", "aria-label": "CSV 파일" });
   const out = h("div", { class: "muted" });
@@ -691,28 +724,35 @@ function importCard(after) {
     act(go, async () => {
       const f = file.files?.[0];
       if (!f) throw new Error("CSV 파일을 고르세요.");
-      const { people, skipped, noBirth, used, ignored } = peopleFromCsv(await f.text());
+      const text = await f.text();
+      const header = (parseCsv(text)[0] ?? []).map((v) => v.trim());
+      // Two layouts: the 목양 sheet's 교인목록 tab (has 교인ID) or the church roster (has 성명).
+      const isRoster = !header.includes("교인ID") && header.includes("성명");
+      const { people, skipped, noBirth, used, ignored } = isRoster ? peopleFromRoster(parseCsv(text)) : peopleFromCsv(text);
       if (!people.length) throw new Error("가져올 사람이 없습니다.");
-      if (!confirm(`${people.length}명을 교적부로 가져옵니다.\n읽는 칸 ${used}개, 읽지 않고 버리는 칸 ${ignored}개.\n계속할까요?`)) return;
-      const total = { created: 0, updated: 0, pending: 0, unchanged: 0, unknown: new Set() };
+      const kind = isRoster ? "교인명부" : "목양 시트 교인목록";
+      if (!confirm(`[${kind}] ${people.length}명을 교적부로 가져옵니다.\n읽는 칸 ${used}개, 읽지 않고 버리는 칸 ${ignored}개.\n계속할까요?`)) return;
+      const total = { created: 0, updated: 0, pending: 0, unchanged: 0, unknown: new Set(), ambiguous: [] };
       for (let i = 0; i < people.length; i += 100) {
-        const r = await api("POST", "/api/registry/import", { people: people.slice(i, i + 100) });
-        total.created += r.created; total.updated += r.updated; total.pending += r.pending; total.unchanged += r.unchanged;
+        const r = await api("POST", isRoster ? "/api/registry/import-roster" : "/api/registry/import", { people: people.slice(i, i + 100) });
+        total.created += r.created; total.updated += r.updated; total.pending += r.pending ?? 0; total.unchanged += r.unchanged;
         r.unknown_titles.forEach((t) => total.unknown.add(t));
+        total.ambiguous.push(...(r.ambiguous ?? []));
       }
       out.replaceChildren(...[
         h("div", {}, `새로 등록 ${total.created}명 · 변경 ${total.updated}명 · 그대로 ${total.unchanged}명${total.pending ? ` · 확인 필요 ${total.pending}명` : ""}`),
         skipped.length ? h("div", {}, `형식이 맞지 않아 건너뛴 줄: ${skipped.join(", ")}`) : null,
         noBirth.length ? h("div", {}, `생년월일을 읽지 못한 줄 (나머지는 가져옴): ${noBirth.join(", ")}`) : null,
         total.unknown.size ? h("div", {}, `목록에 없는 직분이라 기록하지 않음: ${[...total.unknown].join(", ")}`) : null,
+        total.ambiguous.length ? h("div", {}, `같은 이름이 여럿이라 누구인지 알 수 없어 건너뜀: ${total.ambiguous.join(", ")}`) : null,
       ].filter(Boolean));
       file.value = "";
       toast("가져왔습니다.");
       await after();
     });
   return h("details", { class: "card registry-only" },
-    h("summary", {}, h("b", {}, "목양 시트에서 가져오기 (CSV)")),
-    h("p", { class: "muted mt" }, "시트의 '교인목록' 탭에서 [파일] → [다운로드] → [CSV]로 받은 파일을 고르세요. 교인ID·가정ID·이름·관계·생년월일·직분·등록일만 읽고, 메모·기도제목·주소 등 나머지 칸은 이 화면에서 버려져 서버로 가지 않습니다. 여러 번 가져와도 중복되지 않습니다."),
+    h("summary", {}, h("b", {}, "교인명부 / 목양 시트에서 가져오기 (CSV)")),
+    h("p", { class: "muted mt" }, "두 가지 CSV를 받습니다. ① 교인명부(구분·직분/학년·성명·생년월일·연락처): 이름과 생년월일로 같은 분을 찾습니다. ② 목양 시트 '교인목록' 탭: 교인ID·가정ID·이름·관계·생년월일·직분·등록일만 읽습니다. 그 밖의 칸(메모·기도제목·주소 등)은 이 화면에서 버려져 서버로 가지 않습니다. 여러 번 가져와도 중복되지 않고, 직분은 처음 한 번만 기록됩니다."),
     h("div", { class: "row" }, file, h("div", { class: "shrink" }, go)),
     out);
 }

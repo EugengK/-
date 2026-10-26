@@ -331,3 +331,63 @@ describe("birth date and first title from the sheet; CSV import", () => {
     expect(a).toMatchObject({ id: old.id, birth_date: "1970-03-07", current_title: "권사" });
   });
 });
+
+describe("church roster import (no IDs) and auto-linking", () => {
+  beforeEach(resetDb);
+  const roster = (people: unknown[], as = PASTOR) => call("POST", "/api/registry/import-roster", { as, body: { people } });
+  const byName = async (name: string) =>
+    (await json(await call("GET", "/api/members?include_inactive=1", { as: EDITOR }))).filter((m: any) => m.name === name);
+
+  it("creates people with title, birth date and phone; re-import changes nothing", async () => {
+    const people = [
+      { name: "가장로", birth_date: "1958-07-10", phone: "0400 000 001", title: "시무장로" },
+      { name: "나권사", birth_date: "1960-02-09", title: "시무권사" },
+      { name: "다집사", birth_date: "1990-08-09", title: "집사" },
+      { name: "라전도사", title: "전도사" },
+      { name: "마어린이", birth_date: "2013-02-17", note: "주일학교 Year 7" },
+      { name: "바사모", birth_date: "1984-12-21", title: "사모" },
+    ];
+    const r = await json(await roster(people));
+    expect(r).toMatchObject({ created: 6, updated: 0, unchanged: 0, ambiguous: [], unknown_titles: ["사모"] });
+    const [a] = await byName("가장로");
+    expect(a).toMatchObject({ current_title: "장로", birth_date: "1958-07-10", phone: "0400 000 001", member_code: null, current_status: "registered" });
+    expect((await byName("나권사"))[0].current_title).toBe("권사");
+    expect((await byName("다집사"))[0].current_title).toBe("서리집사");
+    expect((await byName("라전도사"))[0].current_title).toBe("전도사");
+    expect((await byName("마어린이"))[0].note).toBe("주일학교 Year 7");
+    expect(await json(await roster(people))).toMatchObject({ created: 0, updated: 0, unchanged: 6 });
+    expect(await count("SELECT COUNT(*) AS n FROM members")).toBe(6);
+  });
+
+  it("pastor only; rejects other fields", async () => {
+    expect((await roster([{ name: "x" }], EDITOR)).status).toBe(403);
+    expect((await roster([{ name: "x", 메모: "상담" }])).status).toBe(400);
+  });
+
+  it("matches by name + birth date; same name with a different birth date is another person; unsure cases are skipped", async () => {
+    await roster([{ name: "김철수", birth_date: "1960-01-01" }]);
+    await roster([{ name: "김철수", birth_date: "1970-01-01" }]); // different person
+    expect(await byName("김철수")).toHaveLength(2);
+    const r = await json(await roster([{ name: "김철수" }])); // no birth date: can't tell which
+    expect(r.ambiguous).toEqual(["김철수"]);
+    expect(await byName("김철수")).toHaveLength(2);
+  });
+
+  it("fills a missing birth date and phone on the one same-name person", async () => {
+    await roster([{ name: "박", title: "성도" }]);
+    expect(await json(await roster([{ name: "박", birth_date: "1980-01-01", phone: "0411" }]))).toMatchObject({ updated: 1 });
+    expect((await byName("박"))[0]).toMatchObject({ birth_date: "1980-01-01", phone: "0411" });
+  });
+
+  it("the sheet sync later links a roster person automatically (same name and birth date)", async () => {
+    await roster([{ name: "윤", birth_date: "1960-05-01", title: "성도" }]);
+    const [m] = await byName("윤");
+    const r = await json(await sync({ people: [person("P-1", "윤", { birth_date: "1960-05-01", title: "권사" })] }));
+    expect(r).toMatchObject({ created: 0, updated: 1, pending: 0 });
+    const [after] = await byName("윤");
+    expect(after).toMatchObject({ id: m.id, member_code: "P-1", family_code: "F-1", current_title: "성도" }); // title kept
+    // Same name but no/other birth date -> still held for the pastor.
+    await roster([{ name: "정", birth_date: "1970-01-01" }]);
+    expect(await json(await sync({ people: [person("P-2", "정", { birth_date: "1971-01-01" })] }))).toMatchObject({ pending: 1 });
+  });
+});

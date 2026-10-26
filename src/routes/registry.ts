@@ -5,7 +5,7 @@ import { auditStatement } from "../audit";
 import { todayInHobart } from "../dates";
 import { CURRENT_STATUS, CURRENT_TITLE, SYNC_ACTIVE_SQL } from "../registrySql";
 import type { AppEnv } from "../types";
-import { applyPeople, firstTitleStatements, loadTitles, peopleSchema } from "./sync";
+import { applyPeople, applyRoster, firstTitleStatements, loadTitles, peopleSchema, rosterSchema } from "./sync";
 import { isUniqueViolation, isoDate, name, optionalText, parseBody, reason } from "../validation";
 
 const STATUS_CODES = ["registered", "attending", "inactive", "left", "transferred", "returned", "deceased"] as const;
@@ -360,4 +360,10 @@ registryRoutes.post(`${CODE}/create`, async (c) => {
 registryRoutes.post("/import", async (c) => {
   const body = await parseBody(c, peopleSchema);
   return c.json(await applyPeople(c.env.DB, c.get("user"), body.people));
+});
+
+/** The church roster CSV (no IDs): matched by name + birth date. Pastor only. */
+registryRoutes.post("/import-roster", async (c) => {
+  const body = await parseBody(c, rosterSchema);
+  return c.json(await applyRoster(c.env.DB, c.get("user"), body.people));
 });
