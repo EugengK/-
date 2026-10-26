@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { auditStatement } from "../audit";
 import { todayInHobart } from "../dates";
-import { addDays, describeRule, occurrences, type Rule } from "../schedule";
+import { addDays, describeRule, occurrences, weekdaysInMonth, type Rule } from "../schedule";
 import type { AppEnv, AppUser } from "../types";
 import { isRealDate, isoDate, name, optionalText, parseBody, reason } from "../validation";
 
@@ -23,6 +23,14 @@ interface RecurringRow extends Rule {
   note: string | null;
   is_active: number;
   generate_from: string | null;
+  amount_mode: "fixed" | "per_week";
+}
+
+/** Amount for one payment date: fixed, or weekly amount × that weekday's count in the month. */
+export function amountFor(r: Pick<RecurringRow, "amount_mode" | "amount_cents" | "weekday">, date: string) {
+  if (r.amount_mode !== "per_week" || r.weekday == null) return { cents: r.amount_cents, weeks: null as number | null };
+  const weeks = weekdaysInMonth(date, r.weekday);
+  return { cents: r.amount_cents * weeks, weeks };
 }
 
 const ruleFields = {
@@ -47,6 +55,7 @@ const recurringCreate = z
     name,
     vendor: optionalText(100),
     amount_cents: positiveCents,
+    amount_mode: z.enum(["fixed", "per_week"]).optional(),
     account: z.enum(["cash", "bank"]),
     department_id: optionalId,
     category_id: optionalId,
@@ -57,6 +66,7 @@ const recurringCreate = z
   })
   .strict()
   .refine(checkRule, RULE_MSG)
+  .refine((v) => v.amount_mode !== "per_week" || v.rule === "monthly_weekday", "'주 단위 금액'은 '매월 몇째 주 무슨 요일' 주기에서만 쓸 수 있습니다.")
   .refine((v) => !v.end_date || v.end_date >= v.start_date, "종료일이 시작일보다 빠릅니다.");
 
 const recurringUpdate = z
@@ -72,7 +82,13 @@ const recurringUpdate = z
   .strict()
   .refine((v) => Object.keys(v).length > 0, "바꿀 내용을 입력하세요.");
 
-const recurringOut = (r: RecurringRow) => ({ ...r, is_active: r.is_active === 1, schedule: describeRule(r) });
+const WEEKDAY_KO = ["일", "월", "화", "수", "목", "금", "토"];
+const recurringOut = (r: RecurringRow) => ({
+  ...r,
+  is_active: r.is_active === 1,
+  schedule: describeRule(r),
+  amount_text: r.amount_mode === "per_week" ? `주 ${(r.amount_cents / 100).toLocaleString("en-AU", { style: "currency", currency: "AUD" })} × 그달 ${WEEKDAY_KO[r.weekday ?? 0]}요일 수` : null,
+});
 
 export const recurringRoutes = new Hono<AppEnv>();
 
@@ -86,7 +102,7 @@ recurringRoutes.post("/", async (c) => {
   const db = c.env.DB;
   const user = c.get("user");
   const row = {
-    name: b.name, vendor: b.vendor ?? null, amount_cents: b.amount_cents, account: b.account,
+    name: b.name, vendor: b.vendor ?? null, amount_cents: b.amount_cents, amount_mode: b.amount_mode ?? "fixed", account: b.account,
     department_id: b.department_id ?? null, category_id: b.category_id ?? null, rule: b.rule,
     day_of_month: b.rule === "monthly_day" ? b.day_of_month! : null,
     nth: b.rule === "monthly_weekday" ? b.nth! : null,
@@ -98,11 +114,11 @@ recurringRoutes.post("/", async (c) => {
     const [, created] = await db.batch([
       db
         .prepare(
-          `INSERT INTO recurring_expenses (name, vendor, amount_cents, account, department_id, category_id, rule, day_of_month,
+          `INSERT INTO recurring_expenses (name, vendor, amount_cents, amount_mode, account, department_id, category_id, rule, day_of_month,
              nth, weekday, anchor_date, start_date, end_date, note, generate_from, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .bind(row.name, row.vendor, row.amount_cents, row.account, row.department_id, row.category_id, row.rule,
+        .bind(row.name, row.vendor, row.amount_cents, row.amount_mode, row.account, row.department_id, row.category_id, row.rule,
           row.day_of_month, row.nth, row.weekday, row.anchor_date, row.start_date, row.end_date, row.note,
           // Never back-fill before today: earlier payments were made outside the app.
           todayInHobart(), user.id),
@@ -189,7 +205,9 @@ export async function generatePlanned(db: D1Database, today = todayInHobart()): 
     const from = r.generate_from && r.generate_from > windowFrom ? r.generate_from : windowFrom;
     for (const d of occurrences(r, from, to)) {
       if (have.has(`${r.id}|${d}`)) continue;
-      const row = { expense_date: d, vendor: r.vendor || r.name, total_cents: r.amount_cents, account: r.account, recurring_id: r.id };
+      const { cents, weeks } = amountFor(r, d);
+      const row = { expense_date: d, vendor: r.vendor || r.name, total_cents: cents, account: r.account, recurring_id: r.id };
+      const note = weeks ? `고정 지출: ${r.name} (주 ${(r.amount_cents / 100).toFixed(2)} × ${weeks}주)` : `고정 지출: ${r.name}`;
       // INSERT OR IGNORE: already there (planned, paid or skipped) -> nothing happens, and the
       // audit row below is only written when this insert actually added a row.
       statements.push(
@@ -198,7 +216,7 @@ export async function generatePlanned(db: D1Database, today = todayInHobart()): 
             `INSERT OR IGNORE INTO expenses (expense_date, scheduled_date, vendor, department_id, category_id, total_cents, account, note, status, recurring_id, created_by)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)`,
           )
-          .bind(d, d, row.vendor, r.department_id, r.category_id, r.amount_cents, r.account, `고정 지출: ${r.name}`, r.id, actor.id),
+          .bind(d, d, row.vendor, r.department_id, r.category_id, cents, r.account, note, r.id, actor.id),
         auditStatement(db, actor, "create", "expenses", "last_insert", undefined, row, true),
       );
     }
@@ -364,4 +382,56 @@ expenseRoutes.get("/summary", async (c) => {
     paid_cents: sum("confirmed"), paid_cash_cents: sum("confirmed", "cash"), paid_bank_cents: sum("confirmed", "bank"),
     planned_cents: sum("planned"),
   });
+});
+
+/** Edits a paid or planned expense. Guarded on the values the editor saw (no silent overwrite). */
+const expenseUpdate = z
+  .object({
+    expense_date: isoDate.optional(),
+    vendor: z.string().transform((v) => v.normalize("NFC").trim()).pipe(z.string().min(1, "지급처/내용을 입력하세요.").max(100)).optional(),
+    total_cents: positiveCents.optional(),
+    gst_cents: z.number().int().min(0).optional(),
+    account: z.enum(["cash", "bank"]).optional(),
+    department_id: optionalId,
+    category_id: optionalId,
+    note: optionalText(300),
+  })
+  .strict()
+  .refine((v) => Object.keys(v).length > 0, "바꿀 내용을 입력하세요.");
+
+expenseRoutes.patch("/:id{[0-9]+}", async (c) => {
+  const id = Number(c.req.param("id"));
+  const b = await parseBody(c, expenseUpdate);
+  const db = c.env.DB;
+  const before = await db
+    .prepare("SELECT id, expense_date, vendor, total_cents, gst_cents, account, department_id, category_id, note, status FROM expenses WHERE id = ?")
+    .bind(id)
+    .first<Record<string, any>>();
+  if (!before) throw new HTTPException(404, { message: "찾을 수 없습니다." });
+  if (before.status === "void") throw new HTTPException(409, { message: "취소된 지출은 고칠 수 없습니다." });
+  const pick = (k: string) => ((b as Record<string, unknown>)[k] === undefined ? before[k] : (b as Record<string, unknown>)[k]);
+  const next = {
+    expense_date: pick("expense_date"), vendor: pick("vendor"), total_cents: pick("total_cents"), gst_cents: pick("gst_cents"),
+    account: pick("account"), department_id: pick("department_id"), category_id: pick("category_id"), note: pick("note"),
+  };
+  if ((next.gst_cents as number) > (next.total_cents as number)) throw new HTTPException(400, { message: "GST가 총액보다 클 수 없습니다." });
+  try {
+    const [u] = await db.batch([
+      db
+        .prepare(
+          `UPDATE expenses SET expense_date = ?, vendor = ?, total_cents = ?, gst_cents = ?, account = ?, department_id = ?, category_id = ?, note = ?
+           WHERE id = ? AND status = ? AND expense_date = ? AND vendor = ? AND total_cents = ? AND gst_cents = ? AND account = ?
+             AND department_id IS ? AND category_id IS ? AND note IS ?`,
+        )
+        .bind(next.expense_date, next.vendor, next.total_cents, next.gst_cents, next.account, next.department_id, next.category_id, next.note,
+          id, before.status, before.expense_date, before.vendor, before.total_cents, before.gst_cents, before.account,
+          before.department_id, before.category_id, before.note),
+      auditStatement(db, c.get("user"), "update", "expenses", id, before, next, true),
+    ]);
+    if (u!.meta.changes === 0) throw new HTTPException(409, { message: "다른 사람이 먼저 고쳤습니다. 새로고침 후 다시 시도하세요." });
+  } catch (err) {
+    if (err instanceof Error && /FOREIGN KEY/i.test(err.message)) throw new HTTPException(400, { message: "없는 부서 또는 지출 항목입니다." });
+    throw err;
+  }
+  return c.json({ id, ...next, status: before.status });
 });

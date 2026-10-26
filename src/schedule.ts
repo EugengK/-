@@ -51,6 +51,14 @@ export function occurrences(r: Rule, from: string, to: string): string[] {
   return out;
 }
 
+/** How many times `weekday` falls in the month of date d (4 or 5). */
+export function weekdaysInMonth(d: string, weekday: number): number {
+  const first = `${d.slice(0, 8)}01`;
+  const firstWd = new Date(toUTC(first)).getUTCDay();
+  const firstHit = 1 + ((weekday - firstWd + 7) % 7);
+  return Math.floor((lastDayOfMonth(d) - firstHit) / 7) + 1;
+}
+
 const WEEKDAYS = ["일", "월", "화", "수", "목", "금", "토"];
 
 /** Korean description, e.g. "매월 첫째 주 일요일". */

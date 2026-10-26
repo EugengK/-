@@ -500,26 +500,42 @@ async function remindDue() {
 
 async function renderExpenses() {
   const ticket = newTicket();
+  const view = location.hash.split("/")[1] || "list"; // list | new | fixed
   const [depts, cats] = await Promise.all([api("GET", "/api/departments"), api("GET", "/api/expense-categories")]);
+  const seg = h("div", { class: "seg mt", role: "tablist" },
+    ...[["list", "지출 내역"], ["new", "지출 입력"], ["fixed", "고정 지출"]]
+      .filter(([k]) => k === "list" || isEditor())
+      .map(([k, label]) => h("button", { type: "button", class: view === k ? "on" : "", onclick: () => { location.hash = `#expenses/${k}`; } }, label)));
+  const body =
+    view === "new" && isEditor() ? expenseEntryCard(depts, cats) :
+    view === "fixed" ? recurringCard(depts, cats, async () => {}) :
+    await expenseListView(depts, cats);
+  paint(ticket, h("h2", {}, "지출"), seg, h("div", { class: "mt" }, body));
+}
+
+/** 지출 내역: period, totals (paid vs planned kept apart), list with edit / pay / cancel. */
+async function expenseListView(depts, cats) {
   const r = monthRange();
   const from = h("input", { type: "date", value: r.from, "aria-label": "시작일" });
   const to = h("input", { type: "date", value: r.to, "aria-label": "종료일" });
+  const deptSel = h("select", { "aria-label": "부서" }, h("option", { value: "" }, "전체 부서"), depts.map((x) => h("option", { value: x.id }, x.name)));
   const out = h("div");
   let seq = 0;
   const load = async () => {
     const mine = ++seq;
     if (from.value > to.value) { out.replaceChildren(h("p", { class: "notice" }, "시작일이 종료일보다 늦습니다.")); return; }
     const q = new URLSearchParams({ from: from.value, to: to.value });
-    const [sum, rows] = await Promise.all([api("GET", `/api/expenses/summary?${q}`), api("GET", `/api/expenses?${q}`)]);
+    const [sum, all] = await Promise.all([api("GET", `/api/expenses/summary?${q}`), api("GET", `/api/expenses?${q}`)]);
     if (mine !== seq) return;
-    out.replaceChildren(...[
+    const rows = deptSel.value ? all.filter((e) => String(e.department_id) === deptSel.value) : all;
+    out.replaceChildren(
       h("div", { class: "card" },
         h("div", { class: "totals" },
           h("div", { class: "stat" }, h("b", {}, money(sum.paid_cash_cents)), h("span", {}, "지급 (현금)")),
           h("div", { class: "stat" }, h("b", {}, money(sum.paid_bank_cents)), h("span", {}, "지급 (은행)")),
           h("div", { class: "stat planned" }, h("b", {}, money(sum.planned_cents)), h("span", {}, "예정 (아직 안 나감)")))),
       h("div", { class: "card" },
-        h("h3", {}, `지출 목록 (${rows.length}건)`),
+        h("h3", {}, `지출 내역 (${rows.length}건)`),
         rows.length
           ? h("table", {}, h("tbody", {}, rows.map((e) =>
               h("tr", { class: e.status === "planned" ? "planned-row" : "" },
@@ -527,21 +543,83 @@ async function renderExpenses() {
                 h("td", {}, e.recurring_name ? h("b", {}, e.recurring_name) : e.vendor, " ", accountTag(e.account),
                   e.recurring_name && e.vendor !== e.recurring_name ? h("div", { class: "muted" }, e.vendor) : null,
                   [e.department_name, e.category_name].some(Boolean) ? h("div", { class: "muted" }, [e.department_name, e.category_name].filter(Boolean).join(" · ")) : null,
-                  e.note && !e.recurring_name ? h("div", { class: "muted" }, e.note) : null),
+                  e.note ? h("div", { class: "muted" }, e.note) : null),
                 h("td", { class: "num" }, money(e.total_cents),
                   h("div", { class: "editor-only" },
                     e.status === "planned" ? h("button", { type: "button", class: "small", onclick: (ev) => payPlanned(ev.currentTarget, e, load) }, "지급") : null,
+                    h("button", { type: "button", class: "mini", onclick: (ev) => editExpense(ev.currentTarget, e, depts, cats, load) }, "수정"),
                     h("button", { type: "button", class: "mini danger-text", onclick: (ev) => voidExpense(ev.currentTarget, e, load) }, e.status === "planned" ? "건너뛰기" : "취소")))))))
           : h("p", { class: "muted" }, "이 기간에 지출이 없습니다.")),
-    ]);
+    );
   };
-  for (const el of [from, to]) el.addEventListener("change", () => act(null, load));
+  for (const el of [from, to, deptSel]) el.addEventListener("change", () => act(null, load));
+  const wrap = h("div",
+    {},
+    h("div", { class: "card" },
+      h("div", { class: "row" }, h("div", {}, h("label", {}, "시작일"), from), h("div", {}, h("label", {}, "종료일"), to)),
+      depts.length ? h("div", { class: "mt" }, deptSel) : null),
+    out);
+  await act(null, load);
+  return wrap;
+}
 
-  // 직접 지출 입력
+/** Edit dialog for an expense (only changed fields are sent). */
+async function editExpense(btn, e, depts, cats, after) {
+  const dlg = h("dialog", { class: "ask" });
+  const date = h("input", { type: "date", value: e.expense_date, "aria-label": "날짜" });
+  const vendor = h("input", { value: e.vendor, maxlength: 100, "aria-label": "지급처 / 내용" });
+  const amount = h("input", { inputmode: "decimal", value: (e.total_cents / 100).toFixed(2), "aria-label": "금액" });
+  const account = h("select", { "aria-label": "계정" }, h("option", { value: "cash" }, "현금"), h("option", { value: "bank" }, "은행"));
+  account.value = e.account;
+  const sel = (label, rows, cur) => {
+    const s = h("select", { "aria-label": label }, h("option", { value: "" }, `${label} 없음`), rows.map((x) => h("option", { value: x.id }, x.name)));
+    s.value = cur == null ? "" : String(cur);
+    return s;
+  };
+  const dept = sel("부서", depts, e.department_id), cat = sel("지출 항목", cats, e.category_id);
+  const note = h("input", { value: e.note ?? "", maxlength: 300, "aria-label": "메모" });
+  const close = () => { dlg.close(); dlg.remove(); };
+  dlg.addEventListener("cancel", (ev) => { ev.preventDefault(); close(); });
+  const save = h("button", { type: "button" }, "저장");
+  save.onclick = () =>
+    act(save, async () => {
+      const cents = toCents(amount.value);
+      if (cents === null || cents <= 0) throw new Error("금액이 올바르지 않습니다.");
+      const body = {};
+      if (date.value !== e.expense_date) body.expense_date = date.value;
+      if (vendor.value.trim() !== e.vendor) body.vendor = vendor.value;
+      if (cents !== e.total_cents) body.total_cents = cents;
+      if (account.value !== e.account) body.account = account.value;
+      const d = dept.value ? Number(dept.value) : null, c = cat.value ? Number(cat.value) : null;
+      if (d !== e.department_id) body.department_id = d;
+      if (c !== e.category_id) body.category_id = c;
+      if (note.value.trim() !== (e.note ?? "")) body.note = note.value;
+      if (!Object.keys(body).length) return close();
+      await api("PATCH", `/api/expenses/${e.id}`, body);
+      close();
+      toast("지출을 고쳤습니다.");
+      await after();
+    });
+  dlg.append(
+    h("h3", {}, "지출 수정"),
+    h("div", { class: "grid" },
+      h("div", { class: "row" }, h("div", {}, h("label", {}, "날짜"), date), h("div", {}, h("label", {}, "금액 ($)"), amount)),
+      h("div", {}, h("label", {}, "지급처 / 내용"), vendor),
+      h("div", { class: "row" }, h("div", {}, h("label", {}, "계정"), account), h("div", {}, h("label", {}, "부서"), dept)),
+      h("div", { class: "row" }, h("div", {}, h("label", {}, "지출 항목"), cat)),
+      h("div", {}, h("label", {}, "메모"), note)),
+    h("p", { class: "muted mt" }, "고친 내용은 '기록' 탭에 이전 값과 함께 남습니다."),
+    h("div", { class: "row mt" }, h("button", { type: "button", class: "secondary", onclick: close }, "닫기"), save));
+  document.body.append(dlg);
+  dlg.showModal();
+}
+
+/** 지출 입력: a one-off expense. */
+function expenseEntryCard(depts, cats) {
   const optSel = (label, rows) => h("select", { "aria-label": label }, h("option", { value: "" }, `${label} (선택)`), rows.map((x) => h("option", { value: x.id }, x.name)));
   const eDate = h("input", { type: "date", value: ymd(new Date()), "aria-label": "날짜" });
-  const eVendor = h("input", { placeholder: "지급처 / 내용 (예: Coles, 간식)", maxlength: 100 });
-  const eAmount = h("input", { inputmode: "decimal", placeholder: "금액 0.00", "aria-label": "금액" });
+  const eVendor = h("input", { placeholder: "지급처 / 내용 (예: Coles, 간식)", maxlength: 100, "aria-label": "지급처 / 내용" });
+  const eAmount = h("input", { inputmode: "decimal", placeholder: "0.00", "aria-label": "금액" });
   const eAccount = h("select", { "aria-label": "계정" }, h("option", { value: "cash" }, "현금"), h("option", { value: "bank" }, "은행"));
   const eDept = optSel("부서", depts), eCat = optSel("지출 항목", cats);
   const eNote = h("input", { placeholder: "메모 (선택)", maxlength: 300 });
@@ -550,27 +628,22 @@ async function renderExpenses() {
     act(eSave, async () => {
       const cents = toCents(eAmount.value);
       if (cents === null || cents <= 0) throw new Error("금액이 올바르지 않습니다. (예: 45.50)");
+      if (!eVendor.value.trim()) throw new Error("지급처 / 내용을 입력하세요.");
       if (!(await ask(`${eDate.value} ${eVendor.value.trim()} ${money(cents)} 지출을 저장할까요?`, { okText: "저장" }))) return;
       await api("POST", "/api/expenses", {
         expense_date: eDate.value, vendor: eVendor.value, total_cents: cents, account: eAccount.value,
         department_id: eDept.value ? Number(eDept.value) : null, category_id: eCat.value ? Number(eCat.value) : null, note: eNote.value || undefined,
       });
       eVendor.value = eAmount.value = eNote.value = "";
-      toast("지출을 저장했습니다.");
-      await load();
+      toast("지출을 저장했습니다. '지출 내역'에서 볼 수 있습니다.");
     });
-
-  paint(ticket,
-    h("h2", {}, "지출"),
-    h("div", { class: "card" }, h("div", { class: "row" }, h("div", {}, h("label", {}, "시작일"), from), h("div", {}, h("label", {}, "종료일"), to))),
-    out,
-    h("details", { class: "card editor-only" }, h("summary", {}, h("b", {}, "직접 지출 입력")),
-      h("div", { class: "grid mt" },
-        h("div", { class: "row" }, h("div", {}, h("label", {}, "날짜"), eDate), h("div", {}, h("label", {}, "금액 ($)"), eAmount), h("div", {}, h("label", {}, "계정"), eAccount)),
-        eVendor, h("div", { class: "row" }, eDept, eCat), eNote, eSave)),
-    recurringCard(depts, cats, load),
-  );
-  await act(null, load);
+  return h("div", { class: "card" },
+    h("h3", {}, "지출 입력"),
+    h("div", { class: "grid" },
+      h("div", { class: "row" }, h("div", {}, h("label", {}, "날짜"), eDate), h("div", {}, h("label", {}, "금액 ($)"), eAmount), h("div", {}, h("label", {}, "계정"), eAccount)),
+      h("div", {}, h("label", {}, "지급처 / 내용"), eVendor),
+      h("div", { class: "row" }, eDept, eCat), eNote, eSave),
+    h("p", { class: "muted mt" }, "영수증 사진으로 입력하는 기능은 다음 단계에서 추가됩니다."));
 }
 
 function recurringCard(depts, cats, afterChange) {
@@ -581,11 +654,11 @@ function recurringCard(depts, cats, afterChange) {
       ? rows.map((r) =>
           h("div", { class: `chip-item ${r.is_active ? "" : "off"}`, style: "flex-wrap:wrap" },
             h("div", { class: "grow" }, h("b", {}, r.name), " ", accountTag(r.account),
-              h("div", { class: "muted" }, `${r.schedule} · ${money(r.amount_cents)}${r.is_active ? "" : " · 중지됨"}`)),
+              h("div", { class: "muted" }, `${r.schedule} · ${r.amount_text ?? money(r.amount_cents)}${r.is_active ? "" : " · 중지됨"}`)),
             h("span", { class: "editor-only" },
               h("button", { type: "button", class: "mini", onclick: async (ev) => {
                 const btn = ev.currentTarget;
-                const text = await ask(`${r.name}\n앞으로의 금액 (이미 잡힌 예정 금액은 지급할 때 고칩니다)`, { input: (r.amount_cents / 100).toFixed(2), okText: "변경" });
+                const text = await ask(`${r.name}\n앞으로의 ${r.amount_mode === "per_week" ? "주당 " : ""}금액 (이미 잡힌 예정 금액은 지급할 때 고칩니다)`, { input: (r.amount_cents / 100).toFixed(2), okText: "변경" });
                 if (text === null) return;
                 await act(btn, async () => {
                   const cents = toCents(text);
@@ -603,8 +676,11 @@ function recurringCard(depts, cats, afterChange) {
   // add form
   const fName = h("input", { placeholder: "이름 (예: 담임목사 사례비, 예배당 렌트비)", maxlength: 50 });
   const fVendor = h("input", { placeholder: "지급처 (선택)", maxlength: 100 });
-  const fAmount = h("input", { inputmode: "decimal", placeholder: "금액 0.00", "aria-label": "금액" });
+  const fAmount = h("input", { inputmode: "decimal", placeholder: "금액 0.00 (주 단위면 1주 금액)", "aria-label": "금액" });
   const fAccount = h("select", { "aria-label": "계정" }, h("option", { value: "bank" }, "은행"), h("option", { value: "cash" }, "현금"));
+  const fPerWeek = h("input", { type: "checkbox", style: "width:auto;min-height:0" });
+  const perWeekBox = h("label", { style: "display:flex;gap:8px;align-items:flex-start;margin:0;color:var(--text)" }, fPerWeek,
+    h("span", {}, "주 단위 금액입니다 (예: 주 $700). 지급하는 달에 그 요일이 몇 번 있는지 세어서 곱합니다. 4번이면 4주치, 5번이면 5주치."));
   const fRule = h("select", { "aria-label": "주기" },
     h("option", { value: "monthly_weekday" }, "매월 몇째 주 무슨 요일"),
     h("option", { value: "monthly_day" }, "매월 며칠"),
@@ -626,6 +702,8 @@ function recurringCard(depts, cats, afterChange) {
       v === "monthly_day" ? [field("날짜", fDay)] :
       v === "weekly" ? [field("요일", fWeekday)] :
       [field("기준일 (한 번 낸 날)", fAnchor)]));
+    perWeekBox.hidden = v !== "monthly_weekday";
+    if (perWeekBox.hidden) fPerWeek.checked = false;
   };
   fRule.addEventListener("change", showRule);
   showRule();
@@ -637,6 +715,7 @@ function recurringCard(depts, cats, afterChange) {
       const rule = fRule.value;
       await api("POST", "/api/recurring-expenses", {
         name: fName.value, vendor: fVendor.value || undefined, amount_cents: cents, account: fAccount.value, rule,
+        amount_mode: fPerWeek.checked ? "per_week" : "fixed",
         nth: rule === "monthly_weekday" ? Number(fNth.value) : undefined,
         weekday: rule === "monthly_weekday" || rule === "weekly" ? Number(fWeekday.value) : undefined,
         day_of_month: rule === "monthly_day" ? Number(fDay.value) : undefined,
@@ -660,6 +739,7 @@ function recurringCard(depts, cats, afterChange) {
         h("div", { class: "row" }, h("div", {}, h("label", {}, "금액 ($)"), fAmount), h("div", {}, h("label", {}, "계정"), fAccount)),
         h("div", { class: "row" }, h("div", {}, h("label", {}, "주기"), fRule), h("div", {}, h("label", {}, "시작일"), fStart)),
         ruleBox,
+        perWeekBox,
         fVendor,
         h("div", { class: "row" }, fDept, fCat),
         fAdd)));

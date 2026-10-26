@@ -168,3 +168,50 @@ describe("expenses", () => {
     expect((await call("POST", "/api/expenses", { as: PASTOR, body: ok })).status).toBe(403);
   });
 });
+
+describe("weekly stipend paid monthly, and editing expenses", () => {
+  beforeEach(resetDb);
+
+  it("counts Sundays in the month", async () => {
+    const { weekdaysInMonth } = await import("../src/schedule");
+    expect(weekdaysInMonth("2026-11-01", 0)).toBe(5); // 1, 8, 15, 22, 29
+    expect(weekdaysInMonth("2026-12-06", 0)).toBe(4);
+    expect(weekdaysInMonth("2026-02-01", 0)).toBe(4);
+    expect(weekdaysInMonth("2028-02-06", 2)).toBe(5); // leap Feb 2028: Tuesdays 1, 8, 15, 22, 29
+  });
+
+  it("first-Sunday stipend of $700 a week: 5 Sundays -> $3,500, 4 Sundays -> $2,800", async () => {
+    const { amountFor } = await import("../src/routes/expenses");
+    const r = { amount_mode: "per_week" as const, amount_cents: 70000, weekday: 0 };
+    expect(amountFor(r, "2026-11-01")).toEqual({ cents: 350000, weeks: 5 });
+    expect(amountFor(r, "2026-12-06")).toEqual({ cents: 280000, weeks: 4 });
+    expect(amountFor({ ...r, amount_mode: "fixed" }, "2026-11-01")).toEqual({ cents: 70000, weeks: null });
+  });
+
+  it("generated planned row carries the month's amount; only allowed with 'nth weekday of month'", async () => {
+    const today = todayInHobart();
+    const body = { name: "담임목사 사례비", amount_cents: 70000, amount_mode: "per_week", account: "bank", rule: "monthly_weekday", nth: 1, weekday: 0, start_date: today };
+    expect((await call("POST", "/api/recurring-expenses", { as: EDITOR, body: { ...body, rule: "weekly" } })).status).toBe(400);
+    const rule = await json(await call("POST", "/api/recurring-expenses", { as: EDITOR, body }));
+    expect(rule.amount_text).toBe("주 $700.00 × 그달 일요일 수");
+    // Generate for a known window instead of "today".
+    await db.prepare("UPDATE recurring_expenses SET generate_from = '2026-10-26', start_date = '2026-10-01' WHERE id = ?").bind(rule.id).run();
+    await generatePlanned(db, "2026-10-26"); // window reaches 2026-11-02 -> 2026-11-01 (5 Sundays)
+    const row = await db.prepare("SELECT expense_date, total_cents, note FROM expenses").first<any>();
+    expect(row).toEqual({ expense_date: "2026-11-01", total_cents: 350000, note: "고정 지출: 담임목사 사례비 (주 700.00 × 5주)" });
+  });
+
+  it("edits a paid expense; audited; void rows cannot be edited; viewer cannot", async () => {
+    const e = await json(await call("POST", "/api/expenses", { as: EDITOR, body: { expense_date: "2026-11-01", vendor: "Coles", total_cents: 4550, account: "cash" } }));
+    const r = await call("PATCH", `/api/expenses/${e.id}`, { as: EDITOR2, body: { total_cents: 4650, vendor: "Coles Hobart", note: "간식" } });
+    expect(r.status).toBe(200);
+    const after = await db.prepare("SELECT vendor, total_cents, note FROM expenses WHERE id = ?").bind(e.id).first();
+    expect(after).toEqual({ vendor: "Coles Hobart", total_cents: 4650, note: "간식" });
+    expect(await count("SELECT COUNT(*) AS n FROM audit_log WHERE table_name = 'expenses' AND action = 'update' AND user_email = ?", EDITOR2)).toBe(1);
+    expect((await call("PATCH", `/api/expenses/${e.id}`, { as: PASTOR, body: { total_cents: 1 } })).status).toBe(403);
+    expect((await call("PATCH", `/api/expenses/${e.id}`, { as: EDITOR, body: { gst_cents: 999999 } })).status).toBe(400);
+    expect((await call("PATCH", `/api/expenses/${e.id}`, { as: EDITOR, body: {} })).status).toBe(400);
+    await call("POST", `/api/expenses/${e.id}/void`, { as: EDITOR, body: { reason: "x" } });
+    expect((await call("PATCH", `/api/expenses/${e.id}`, { as: EDITOR, body: { total_cents: 1 } })).status).toBe(409);
+  });
+});
