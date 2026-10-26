@@ -29,10 +29,10 @@ async function newMember(name: string) {
 describe("titles (직분)", () => {
   beforeEach(resetDb);
 
-  it("seeds the six titles; 집사 is a yearly appointment", async () => {
+  it("seeds the six titles; 서리집사 is a yearly appointment", async () => {
     const t = await json(await call("GET", "/api/registry/titles", { as: EDITOR }));
-    expect(t.map((x: any) => x.name)).toEqual(["성도", "청년", "집사", "장립집사", "권사", "장로"]);
-    expect(t.find((x: any) => x.name === "집사").term_limited).toBe(true);
+    expect(t.map((x: any) => x.name)).toEqual(["성도", "청년", "서리집사", "장립집사", "권사", "장로"]);
+    expect(t.find((x: any) => x.name === "서리집사").term_limited).toBe(true);
     expect(t.find((x: any) => x.name === "장로").term_limited).toBe(false);
   });
 
@@ -59,10 +59,10 @@ describe("title history", () => {
     await call("POST", `/api/registry/members/${m.id}/titles`, { as: PASTOR, body: { title_id: 4, start_date: `${Number(year) + 1}-01-01` } });
 
     const list = await json(await call("GET", "/api/members", { as: EDITOR }));
-    expect(list.find((x: any) => x.id === m.id).current_title).toBe("집사");
+    expect(list.find((x: any) => x.id === m.id).current_title).toBe("서리집사");
 
     const exp = await json(await call("GET", `/api/registry/expiring?year=${year}`, { as: PASTOR }));
-    expect(exp.map((e: any) => [e.member_name, e.title_name])).toEqual([["홍길동", "집사"]]);
+    expect(exp.map((e: any) => [e.member_name, e.title_name])).toEqual([["홍길동", "서리집사"]]);
   });
 
   it("validates dates and titles; voiding removes it from 'current'", async () => {

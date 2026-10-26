@@ -23,7 +23,7 @@ CREATE TABLE titles (
   is_active    INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))
 );
 INSERT INTO titles (name, term_limited, sort_order) VALUES
-  ('성도', 0, 1), ('청년', 0, 2), ('집사', 1, 3), ('장립집사', 0, 4), ('권사', 0, 5), ('장로', 0, 6);
+  ('성도', 0, 1), ('청년', 0, 2), ('집사', 1, 3) -- renamed to 서리집사 in 0005, ('장립집사', 0, 4), ('권사', 0, 5), ('장로', 0, 6);
 
 -- A title held for a period. end_date NULL = open-ended.
 CREATE TABLE member_titles (
