@@ -84,6 +84,27 @@ async function api(method, path, body) {
   return data;
 }
 
+/**
+ * In-page confirm/prompt. The browser's own confirm()/prompt() can be silently switched off
+ * ("prevent this page from creating additional dialogs"), which would make buttons do nothing.
+ * Resolves to true/false, or — with `input` — to the typed text / null when cancelled.
+ */
+function ask(message, { input, okText = "확인", cancelText = "취소" } = {}) {
+  return new Promise((resolve) => {
+    const dlg = h("dialog", { class: "ask" });
+    const field = input !== undefined ? h("input", { value: input ?? "", maxlength: 300, "aria-label": "입력" }) : null;
+    const done = (v) => { dlg.close(); dlg.remove(); resolve(v); };
+    const ok = h("button", { type: "button", onclick: () => done(field ? field.value : true) }, okText);
+    const cancel = h("button", { type: "button", class: "secondary", onclick: () => done(field ? null : false) }, cancelText);
+    dlg.addEventListener("cancel", (e) => { e.preventDefault(); done(field ? null : false); });
+    field?.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) ok.click(); });
+    dlg.append(h("p", { class: "ask-msg" }, message), field ?? "", h("div", { class: "row mt" }, cancel, ok));
+    document.body.append(dlg);
+    dlg.showModal();
+    (field ?? ok).focus();
+  });
+}
+
 /** Runs an async action, reporting errors; disables the button while it runs. */
 async function act(button, fn) {
   if (button) button.disabled = true;
@@ -274,7 +295,7 @@ async function renderEntry(keepDate) {
       const warn = anonymous.length
         ? `⚠️ ${anonymous.map((i) => `${i + 1}번째`).join(", ")} 줄은 성도 이름이 없어 무기명으로 저장됩니다.\n(이름을 넣으려면 '취소')\n\n`
         : "";
-      if (!confirm(`${warn}${date.value} 헌금 ${entries.length}건, 합계 ${money(total)}을 저장할까요?`)) {
+      if (!(await ask(`${warn}${date.value} 헌금 ${entries.length}건, 합계 ${money(total)}을 저장할까요?`, { okText: "저장" }))) {
         if (anonymous.length) lines[anonymous[0]].focusGiver();
         return;
       }
@@ -381,8 +402,8 @@ async function renderOfferings() {
   await reload();
 }
 
-function voidOffering(btn, o, after) {
-  const reason = prompt(`${o.offering_date} ${o.fund_type_name} ${money(o.amount_cents)}\n이 항목을 취소합니다. 취소 사유를 입력하세요.\n(잘못 입력했다면 취소 후 다시 입력하세요.)`);
+async function voidOffering(btn, o, after) {
+  const reason = await ask(`${o.offering_date} ${o.fund_type_name} ${money(o.amount_cents)}\n이 항목을 취소합니다. 취소 사유를 입력하세요.\n(잘못 입력했다면 취소 후 다시 입력하세요.)`, { input: "", okText: "취소 처리", cancelText: "닫기" });
   if (reason === null) return;
   act(btn, async () => {
     await api("POST", `/api/offerings/${o.id}/void`, { reason });
@@ -490,13 +511,15 @@ async function renderRegistry() {
                 h("div", { class: "grow" }, h("b", {}, p.name), " ", h("span", { class: "muted" }, [p.relation, p.member_code].filter(Boolean).join(" · "))),
                 h("div", { class: "row shrink" },
                   ...p.candidates.map((cand) =>
-                    h("button", { type: "button", class: "secondary small", onclick: (e) => {
-                      if (!confirm(`시트의 '${p.name}'(${p.member_code})을(를) 이미 등록된 '${cand.name}'${cand.note ? `(${cand.note})` : ""}과(와) 같은 분으로 연결할까요?`)) return;
-                      act(e.currentTarget, async () => { await api("POST", `/api/registry/pending/${p.member_code}/link`, { member_id: cand.id }); toast("연결했습니다."); await Promise.all([load(), loadPending()]); });
+                    h("button", { type: "button", class: "secondary small", onclick: async (e) => {
+                      const btn = e.currentTarget;
+                      if (!(await ask(`시트의 '${p.name}'(${p.member_code})을(를) 이미 등록된 '${cand.name}'${cand.note ? `(${cand.note})` : ""}과(와) 같은 분으로 연결할까요?`))) return;
+                      act(btn, async () => { await api("POST", `/api/registry/pending/${p.member_code}/link`, { member_id: cand.id }); toast("연결했습니다."); await Promise.all([load(), loadPending()]); });
                     } }, `같은 분${p.candidates.length > 1 ? ` (#${cand.id}${cand.note ? ` ${cand.note}` : ""})` : ""}`)),
-                  h("button", { type: "button", class: "small", onclick: (e) => {
-                    if (!confirm(`'${p.name}'을(를) 다른 분으로 새로 등록할까요?`)) return;
-                    act(e.currentTarget, async () => { await api("POST", `/api/registry/pending/${p.member_code}/create`, {}); toast("새로 등록했습니다."); await Promise.all([load(), loadPending()]); });
+                  h("button", { type: "button", class: "small", onclick: async (e) => {
+                    const btn = e.currentTarget;
+                    if (!(await ask(`'${p.name}'을(를) 다른 분으로 새로 등록할까요?`))) return;
+                    act(btn, async () => { await api("POST", `/api/registry/pending/${p.member_code}/create`, {}); toast("새로 등록했습니다."); await Promise.all([load(), loadPending()]); });
                   } }, "새로 등록"))))))]
         : []),
     );
@@ -522,10 +545,11 @@ async function renderRegistryMember(ticket, id) {
   const reload = () => { renderRegistry(); };
 
   const voidBtn = (path, what) =>
-    h("button", { type: "button", class: "danger small registry-only", onclick: (e) => {
-      const reason = prompt(`${what}\n이 기록을 취소합니다. 사유를 입력하세요.`);
+    h("button", { type: "button", class: "danger small registry-only", onclick: async (e) => {
+      const btn = e.currentTarget;
+      const reason = await ask(`${what}\n이 기록을 취소합니다. 사유를 입력하세요.`, { input: "", okText: "취소 처리", cancelText: "닫기" });
       if (reason === null) return;
-      act(e.currentTarget, async () => { await api("POST", path, { reason }); toast("취소했습니다."); reload(); });
+      act(btn, async () => { await api("POST", path, { reason }); toast("취소했습니다."); reload(); });
     } }, "취소");
 
   // 직분 추가
@@ -722,6 +746,15 @@ function importCard(after) {
   const go = h("button", { type: "button" }, "가져오기");
   go.onclick = () =>
     act(go, async () => {
+      out.textContent = "파일을 확인하는 중…";
+      try {
+        await runImport();
+      } catch (err) {
+        out.replaceChildren(h("div", { class: "notice" }, `가져오지 못했습니다: ${err.message}`));
+        throw err;
+      }
+    });
+  const runImport = async () => {
       const f = file.files?.[0];
       if (!f) throw new Error("CSV 파일을 고르세요.");
       const text = await f.text();
@@ -731,7 +764,11 @@ function importCard(after) {
       const { people, skipped, noBirth, used, ignored } = isRoster ? peopleFromRoster(parseCsv(text)) : peopleFromCsv(text);
       if (!people.length) throw new Error("가져올 사람이 없습니다.");
       const kind = isRoster ? "교인명부" : "목양 시트 교인목록";
-      if (!confirm(`[${kind}] ${people.length}명을 교적부로 가져옵니다.\n읽는 칸 ${used}개, 읽지 않고 버리는 칸 ${ignored}개.\n계속할까요?`)) return;
+      if (!(await ask(`[${kind}] ${people.length}명을 교적부로 가져옵니다.\n읽는 칸 ${used}개, 읽지 않고 버리는 칸 ${ignored}개.\n계속할까요?`, { okText: "가져오기" }))) {
+        out.textContent = "가져오기를 취소했습니다.";
+        return;
+      }
+      out.textContent = `${people.length}명을 보내는 중…`;
       const total = { created: 0, updated: 0, pending: 0, unchanged: 0, unknown: new Set(), ambiguous: [] };
       for (let i = 0; i < people.length; i += 100) {
         const r = await api("POST", isRoster ? "/api/registry/import-roster" : "/api/registry/import", { people: people.slice(i, i + 100) });
@@ -749,7 +786,7 @@ function importCard(after) {
       file.value = "";
       toast("가져왔습니다.");
       await after();
-    });
+  };
   return h("details", { class: "card registry-only" },
     h("summary", {}, h("b", {}, "교인명부 / 목양 시트에서 가져오기 (CSV)")),
     h("p", { class: "muted mt" }, "두 가지 CSV를 받습니다. ① 교인명부(구분·직분/학년·성명·생년월일·연락처): 이름과 생년월일로 같은 분을 찾습니다. ② 목양 시트 '교인목록' 탭: 교인ID·가정ID·이름·관계·생년월일·직분·등록일만 읽습니다. 그 밖의 칸(메모·기도제목·주소 등)은 이 화면에서 버려져 서버로 가지 않습니다. 여러 번 가져와도 중복되지 않고, 직분은 처음 한 번만 기록됩니다."),
@@ -783,10 +820,11 @@ function lookupCard(title, path) {
             h("div", { class: `chip-item ${r.is_active ? "" : "off"}` },
               h("span", { class: "grow" }, r.name, r.is_active ? "" : h("span", { class: "muted" }, " (중지)")),
               h("span", { class: "editor-only" },
-                h("button", { type: "button", class: "mini", title: "이름 변경", onclick: (e) => {
-                  const name = prompt("새 이름", r.name);
+                h("button", { type: "button", class: "mini", title: "이름 변경", onclick: async (e) => {
+                  const btn = e.currentTarget;
+                  const name = await ask("새 이름", { input: r.name, okText: "변경" });
                   if (name === null) return;
-                  act(e.currentTarget, async () => { await api("PATCH", `${path}/${r.id}`, { name }); await load(); });
+                  act(btn, async () => { await api("PATCH", `${path}/${r.id}`, { name }); await load(); });
                 } }, "변경"),
                 h("button", { type: "button", class: "mini danger-text", onclick: (e) =>
                   act(e.currentTarget, async () => { await api("PATCH", `${path}/${r.id}`, { is_active: !r.is_active }); await load(); }) },
@@ -820,10 +858,11 @@ function openingBalanceCard() {
             h("div", { class: "head" }, h("b", {}, label), h("span", {}, `${cur.as_of_date} 기준`)),
             h("div", { class: "row" },
               h("div", {}, h("b", { style: "font-size:18px" }, money(cur.amount_cents)), cur.note ? h("div", { class: "muted" }, cur.note) : null),
-              h("div", { class: "shrink editor-only" }, h("button", { type: "button", class: "danger small", onclick: (e) => {
-                const reason = prompt(`${label} 시작 잔액 ${money(cur.amount_cents)}을 취소합니다. 사유를 입력하세요.`);
+              h("div", { class: "shrink editor-only" }, h("button", { type: "button", class: "danger small", onclick: async (e) => {
+                const btn = e.currentTarget;
+                const reason = await ask(`${label} 시작 잔액 ${money(cur.amount_cents)}을 취소합니다. 사유를 입력하세요.`, { input: "", okText: "취소 처리", cancelText: "닫기" });
                 if (reason === null) return;
-                act(e.currentTarget, async () => { await api("POST", `/api/opening-balances/${cur.id}/void`, { reason }); await load(); });
+                act(btn, async () => { await api("POST", `/api/opening-balances/${cur.id}/void`, { reason }); await load(); });
               } }, "취소"))));
         }
         const date = h("input", { type: "date", value: ymd(new Date()) });
@@ -834,7 +873,7 @@ function openingBalanceCard() {
           act(save, async () => {
             const cents = toCents(amount.value, { allowNegative: true });
             if (cents === null) throw new Error("금액이 올바르지 않습니다. (예: 12500 또는 12500.50)");
-            if (!confirm(`${label} 시작 잔액을 ${date.value} 기준 ${money(cents)}으로 저장할까요?`)) return;
+            if (!(await ask(`${label} 시작 잔액을 ${date.value} 기준 ${money(cents)}으로 저장할까요?`, { okText: "저장" }))) return;
             await api("POST", "/api/opening-balances", { account, as_of_date: date.value, amount_cents: cents, note: note.value || undefined });
             toast("저장했습니다.");
             await load();
