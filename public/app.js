@@ -1,0 +1,553 @@
+// 교회 회계 — screens. Plain JS, no build step.
+// All text from the server is inserted with textContent (via h()), never innerHTML.
+
+const state = { me: null, settings: {}, funds: [], members: [] };
+const view = document.getElementById("view");
+
+// ---------- helpers ----------
+
+/** h("div", {class: "x", onclick: fn}, "text", child) */
+function h(tag, attrs = {}, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "class") el.className = v;
+    else if (v === true) el.setAttribute(k, "");
+    else el.setAttribute(k, String(v));
+  }
+  for (const c of children.flat()) {
+    if (c === null || c === undefined || c === false) continue;
+    el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return el;
+}
+
+const moneyFmt = new Intl.NumberFormat("en-AU", { style: "currency", currency: "AUD" });
+const money = (cents) => moneyFmt.format(cents / 100);
+
+/** "1,234.5" / "$20" -> cents. Exact (no floating point). Returns null if not a valid amount. */
+function toCents(text, { allowNegative = false } = {}) {
+  const s = String(text).replace(/[\s,$]/g, "");
+  const m = /^(-)?(\d{1,10})(?:\.(\d{1,2}))?$/.exec(s);
+  if (!m || (m[1] && !allowNegative)) return null;
+  const cents = Number(m[2]) * 100 + Number((m[3] ?? "").padEnd(2, "0"));
+  return m[1] ? -cents : cents;
+}
+
+const pad = (n) => String(n).padStart(2, "0");
+const ymd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+function lastSunday() {
+  const d = new Date();
+  d.setDate(d.getDate() - d.getDay());
+  return ymd(d);
+}
+function monthRange() {
+  const d = new Date();
+  return { from: ymd(new Date(d.getFullYear(), d.getMonth(), 1)), to: ymd(new Date(d.getFullYear(), d.getMonth() + 1, 0)) };
+}
+
+let toastTimer;
+function toast(msg, isError = false) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.className = isError ? "toast error" : "toast";
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.hidden = true), isError ? 6000 : 2500);
+}
+
+async function api(method, path, body) {
+  const init = { method, headers: {} };
+  if (method !== "GET") {
+    init.headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(body ?? {});
+  }
+  const res = await fetch(path, init);
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    /* empty body */
+  }
+  if (!res.ok) throw new Error(data?.error ?? `오류가 발생했습니다 (${res.status})`);
+  return data;
+}
+
+/** Runs an async action, reporting errors; disables the button while it runs. */
+async function act(button, fn) {
+  if (button) button.disabled = true;
+  try {
+    return await fn();
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+const isEditor = () => state.me?.role === "editor";
+const methodTag = (m) => h("span", { class: `tag ${m}` }, m === "cash" ? "현금" : "온라인");
+
+async function loadFunds() {
+  state.funds = await api("GET", "/api/fund-types");
+}
+async function loadMembers() {
+  state.members = await api("GET", "/api/members");
+}
+const memberLabel = (m) => (m.note ? `${m.name} (${m.note})` : m.name);
+
+// ---------- 헌금 입력 ----------
+
+function lineEditor(onChange) {
+  const line = { method: "cash" };
+  const fund = h(
+    "select",
+    { "aria-label": "헌금 종류", onchange: onChange },
+    state.funds.map((f) => h("option", { value: f.id }, f.name)),
+  );
+  const amount = h("input", { inputmode: "decimal", placeholder: "0.00", "aria-label": "금액", oninput: onChange });
+  const member = h(
+    "select",
+    { "aria-label": "성도", onchange: onChange },
+    h("option", { value: "" }, "(무기명)"),
+    state.members.map((m) => h("option", { value: m.id }, memberLabel(m))),
+  );
+  const note = h("input", { placeholder: "메모 (선택)", "aria-label": "메모", maxlength: 300 });
+  const cashBtn = h("button", { type: "button", class: "on" }, "현금");
+  const onlineBtn = h("button", { type: "button" }, "온라인");
+  const setMethod = (m) => {
+    line.method = m;
+    cashBtn.classList.toggle("on", m === "cash");
+    onlineBtn.classList.toggle("on", m === "online");
+    onChange();
+  };
+  cashBtn.onclick = () => setMethod("cash");
+  onlineBtn.onclick = () => setMethod("online");
+
+  const removeBtn = h("button", { type: "button", class: "danger small" }, "삭제");
+  const el = h(
+    "div",
+    { class: "line" },
+    h("div", { class: "head" }, h("span", {}, "헌금"), removeBtn),
+    h(
+      "div",
+      { class: "grid" },
+      h("div", { class: "row" }, h("div", {}, h("label", {}, "종류"), fund), h("div", {}, h("label", {}, "금액 ($)"), amount)),
+      h("div", { class: "row" }, h("div", {}, h("label", {}, "방식"), h("div", { class: "seg" }, cashBtn, onlineBtn)), h("div", {}, h("label", {}, "성도"), member)),
+      note,
+    ),
+  );
+  Object.assign(line, {
+    el,
+    removeBtn,
+    focus: () => amount.focus(),
+    cents: () => toCents(amount.value),
+    isBlank: () => amount.value.trim() === "",
+    value: () => ({
+      fund_type_id: Number(fund.value),
+      amount_cents: toCents(amount.value),
+      method: line.method,
+      member_id: member.value ? Number(member.value) : null,
+      note: note.value.trim() || undefined,
+    }),
+  });
+  return line;
+}
+
+async function renderEntry() {
+  if (!isEditor()) {
+    view.replaceChildren(h("h2", {}, "헌금 입력"), h("p", { class: "notice" }, "열람 권한으로 로그인되어 있어 입력할 수 없습니다. '헌금 내역'에서 확인하세요."));
+    return;
+  }
+  await Promise.all([loadFunds(), loadMembers()]);
+  if (!state.funds.length) {
+    view.replaceChildren(h("h2", {}, "헌금 입력"), h("p", { class: "notice" }, "설정에서 헌금 종류를 먼저 추가하세요."));
+    return;
+  }
+  const lines = [];
+  const date = h("input", { type: "date", value: lastSunday(), "aria-label": "날짜" });
+  const list = h("div");
+  const totalCash = h("b", {}, money(0));
+  const totalOnline = h("b", {}, money(0));
+  const totalAll = h("b", {}, money(0));
+  const recalc = () => {
+    let cash = 0, online = 0;
+    for (const l of lines) {
+      const c = l.cents();
+      if (c === null) continue;
+      if (l.method === "cash") cash += c; else online += c;
+    }
+    totalCash.textContent = money(cash);
+    totalOnline.textContent = money(online);
+    totalAll.textContent = money(cash + online);
+  };
+  const addLine = () => {
+    const l = lineEditor(recalc);
+    l.removeBtn.onclick = () => {
+      if (lines.length === 1) return;
+      lines.splice(lines.indexOf(l), 1);
+      l.el.remove();
+      recalc();
+    };
+    lines.push(l);
+    list.append(l.el);
+    return l;
+  };
+  addLine();
+
+  const save = h("button", { type: "button" }, "저장");
+  save.onclick = () =>
+    act(save, async () => {
+      const filled = lines.filter((l) => !l.isBlank());
+      if (!filled.length) throw new Error("금액을 입력하세요.");
+      const bad = filled.findIndex((l) => l.cents() === null || l.cents() <= 0);
+      if (bad >= 0) throw new Error(`${bad + 1}번째 줄 금액이 올바르지 않습니다. (예: 20 또는 20.50)`);
+      const entries = filled.map((l) => l.value());
+      const total = entries.reduce((s, e) => s + e.amount_cents, 0);
+      if (!confirm(`${date.value} 헌금 ${entries.length}건, 합계 ${money(total)}을 저장할까요?`)) return;
+      await api("POST", "/api/offerings", { offering_date: date.value, entries });
+      toast(`저장했습니다: ${entries.length}건, ${money(total)}`);
+      renderEntry();
+    });
+
+  view.replaceChildren(
+    h("h2", {}, "헌금 입력"),
+    h("div", { class: "card" }, h("label", {}, "날짜"), date),
+    list,
+    h("button", { type: "button", class: "secondary", onclick: () => addLine().focus() }, "+ 줄 추가"),
+    h(
+      "div",
+      { class: "card mt" },
+      h("div", { class: "totals" },
+        h("div", { class: "stat" }, totalCash, h("span", {}, "현금")),
+        h("div", { class: "stat" }, totalOnline, h("span", {}, "온라인")),
+        h("div", { class: "stat" }, totalAll, h("span", {}, "합계"))),
+      h("div", { class: "mt" }, save),
+    ),
+  );
+  lines[0].focus();
+}
+
+// ---------- 헌금 내역 ----------
+
+async function renderOfferings() {
+  await loadFunds();
+  const r = monthRange();
+  const from = h("input", { type: "date", value: r.from, "aria-label": "시작일" });
+  const to = h("input", { type: "date", value: r.to, "aria-label": "종료일" });
+  const fund = h("select", { "aria-label": "헌금 종류" }, h("option", { value: "" }, "전체 종류"), state.funds.map((f) => h("option", { value: f.id }, f.name)));
+  const showVoid = h("input", { type: "checkbox", style: "width:auto;min-height:0" });
+  const out = h("div");
+
+  const load = async () => {
+    const q = new URLSearchParams({ from: from.value, to: to.value });
+    if (fund.value) q.set("fund_type_id", fund.value);
+    const [sum, rows] = await Promise.all([
+      api("GET", `/api/offerings/summary?${q}`),
+      api("GET", `/api/offerings?${q}${showVoid.checked ? "&include_void=1" : ""}`),
+    ]);
+    const byFund = new Map();
+    for (const s of sum.rows) {
+      const e = byFund.get(s.fund_type_id) ?? { name: s.fund_type_name, cash: 0, online: 0 };
+      e[s.method] += s.total_cents;
+      byFund.set(s.fund_type_id, e);
+    }
+    out.replaceChildren(
+      h("div", { class: "card" },
+        h("div", { class: "totals" },
+          h("div", { class: "stat" }, h("b", {}, money(sum.cash_cents)), h("span", {}, "현금")),
+          h("div", { class: "stat" }, h("b", {}, money(sum.online_cents)), h("span", {}, "온라인")),
+          h("div", { class: "stat" }, h("b", {}, money(sum.total_cents)), h("span", {}, "합계"))),
+        byFund.size
+          ? h("table", { class: "mt" },
+              h("thead", {}, h("tr", {}, h("th", {}, "종류"), h("th", { class: "num" }, "현금"), h("th", { class: "num" }, "온라인"), h("th", { class: "num" }, "합계"))),
+              h("tbody", {}, [...byFund.values()].map((e) =>
+                h("tr", {}, h("td", {}, e.name), h("td", { class: "num" }, money(e.cash)), h("td", { class: "num" }, money(e.online)), h("td", { class: "num" }, money(e.cash + e.online))))))
+          : h("p", { class: "muted" }, "이 기간에 헌금 기록이 없습니다.")),
+      rows.length
+        ? h("div", { class: "card" },
+            h("h3", {}, `상세 (${rows.length}건)`),
+            h("table", {},
+              h("tbody", {}, rows.map((o) =>
+                h("tr", { class: o.status === "void" ? "void-row" : "" },
+                  h("td", {}, o.offering_date, h("br"), h("span", { class: "muted" }, o.fund_type_name)),
+                  h("td", {}, o.member_name ?? "(무기명)", " ", methodTag(o.method),
+                    o.note ? h("div", { class: "muted" }, o.note) : null,
+                    o.status === "void" ? h("div", {}, h("span", { class: "tag void" }, "취소됨"), " ", o.void_reason) : null),
+                  h("td", { class: "num" }, money(o.amount_cents),
+                    o.status === "active"
+                      ? h("div", { class: "editor-only" }, h("button", { type: "button", class: "danger small", onclick: (e) => voidOffering(e.currentTarget, o, load) }, "취소"))
+                      : null)))))
+          )
+        : null,
+    );
+  };
+  const reload = () => act(null, load);
+  for (const el of [from, to, fund, showVoid]) el.addEventListener("change", reload);
+
+  view.replaceChildren(
+    h("h2", {}, "헌금 내역"),
+    h("div", { class: "card" },
+      h("div", { class: "row" }, h("div", {}, h("label", {}, "시작일"), from), h("div", {}, h("label", {}, "종료일"), to)),
+      h("div", { class: "row mt" }, h("div", {}, h("label", {}, "종류"), fund),
+        h("label", { class: "shrink", style: "display:flex;gap:6px;align-items:center;margin:0" }, showVoid, "취소된 항목 보기"))),
+    out,
+  );
+  await reload();
+}
+
+function voidOffering(btn, o, after) {
+  const reason = prompt(`${o.offering_date} ${o.fund_type_name} ${money(o.amount_cents)}\n이 항목을 취소합니다. 취소 사유를 입력하세요.\n(잘못 입력했다면 취소 후 다시 입력하세요.)`);
+  if (reason === null) return;
+  act(btn, async () => {
+    await api("POST", `/api/offerings/${o.id}/void`, { reason });
+    toast("취소했습니다.");
+    await after();
+  });
+}
+
+// ---------- 성도 ----------
+
+async function renderMembers() {
+  const q = h("input", { type: "search", placeholder: "이름 검색", "aria-label": "이름 검색" });
+  const showInactive = h("input", { type: "checkbox", style: "width:auto;min-height:0" });
+  const list = h("ul", { class: "list" });
+  const load = async () => {
+    const p = new URLSearchParams();
+    if (q.value.trim()) p.set("q", q.value.trim());
+    if (showInactive.checked) p.set("include_inactive", "1");
+    const rows = await api("GET", `/api/members?${p}`);
+    list.replaceChildren(
+      ...(rows.length
+        ? rows.map((m) =>
+            h("li", {},
+              h("div", { class: "grow" }, h("b", {}, m.name), m.is_active ? "" : h("span", { class: "tag void" }, " 비활성"),
+                m.phone ? h("div", { class: "muted" }, m.phone) : null,
+                m.note ? h("div", { class: "muted" }, m.note) : null),
+              h("div", { class: "editor-only row shrink" },
+                h("button", { type: "button", class: "secondary small", onclick: (e) => editMember(e.currentTarget, m, load) }, "수정"),
+                h("button", { type: "button", class: "danger small", onclick: (e) =>
+                  act(e.currentTarget, async () => {
+                    await api("PATCH", `/api/members/${m.id}`, { is_active: !m.is_active });
+                    await load();
+                  }) }, m.is_active ? "비활성화" : "다시 사용"))))
+        : [h("li", { class: "muted" }, "성도가 없습니다.")]),
+    );
+  };
+  let timer;
+  q.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => act(null, load), 250); });
+  showInactive.addEventListener("change", () => act(null, load));
+
+  const name = h("input", { placeholder: "이름", maxlength: 50 });
+  const phone = h("input", { placeholder: "연락처 (선택)", inputmode: "tel", maxlength: 30 });
+  const note = h("input", { placeholder: "메모 (선택, 동명이인 구분 등)", maxlength: 300 });
+  const add = h("button", { type: "button" }, "추가");
+  add.onclick = () =>
+    act(add, async () => {
+      await api("POST", "/api/members", { name: name.value, phone: phone.value, note: note.value });
+      name.value = phone.value = note.value = "";
+      toast("추가했습니다.");
+      await load();
+    });
+
+  view.replaceChildren(
+    h("h2", {}, "성도"),
+    h("div", { class: "card editor-only" }, h("h3", {}, "성도 추가"), h("div", { class: "grid" }, name, phone, note, add)),
+    h("div", { class: "card" },
+      h("div", { class: "row" }, q, h("label", { class: "shrink", style: "display:flex;gap:6px;align-items:center;margin:0" }, showInactive, "비활성 포함")),
+      list),
+  );
+  await act(null, load);
+}
+
+function editMember(btn, m, after) {
+  const name = prompt("이름", m.name);
+  if (name === null) return;
+  const phone = prompt("연락처 (비우면 삭제)", m.phone ?? "");
+  if (phone === null) return;
+  const note = prompt("메모 (비우면 삭제)", m.note ?? "");
+  if (note === null) return;
+  act(btn, async () => {
+    await api("PATCH", `/api/members/${m.id}`, { name, phone, note });
+    toast("수정했습니다.");
+    await after();
+  });
+}
+
+// ---------- 설정 ----------
+
+function lookupCard(title, path) {
+  const list = h("ul", { class: "list" });
+  const load = async () => {
+    const rows = await api("GET", `${path}?include_inactive=1`);
+    list.replaceChildren(
+      ...(rows.length
+        ? rows.map((r) =>
+            h("li", {},
+              h("div", { class: "grow" }, r.name, r.is_active ? "" : h("span", { class: "tag void" }, " 사용 중지")),
+              h("div", { class: "editor-only row shrink" },
+                h("button", { type: "button", class: "secondary small", onclick: (e) => {
+                  const name = prompt("새 이름", r.name);
+                  if (name === null) return;
+                  act(e.currentTarget, async () => { await api("PATCH", `${path}/${r.id}`, { name }); await load(); });
+                } }, "이름 변경"),
+                h("button", { type: "button", class: "danger small", onclick: (e) =>
+                  act(e.currentTarget, async () => { await api("PATCH", `${path}/${r.id}`, { is_active: !r.is_active }); await load(); }) },
+                  r.is_active ? "사용 중지" : "다시 사용"))))
+        : [h("li", { class: "muted" }, "항목이 없습니다.")]),
+    );
+  };
+  const input = h("input", { placeholder: "새 항목 이름", maxlength: 50 });
+  const add = h("button", { type: "button", class: "shrink" }, "추가");
+  add.onclick = () =>
+    act(add, async () => {
+      await api("POST", path, { name: input.value, sort_order: 100 });
+      input.value = "";
+      await load();
+    });
+  const card = h("div", { class: "card" }, h("h3", {}, title), list, h("div", { class: "row mt editor-only" }, input, add));
+  return { card, load };
+}
+
+function openingBalanceCard() {
+  const body = h("div");
+  const load = async () => {
+    const rows = await api("GET", "/api/opening-balances");
+    const byAccount = Object.fromEntries(rows.map((r) => [r.account, r]));
+    body.replaceChildren(
+      ...["cash", "bank"].map((account) => {
+        const label = account === "cash" ? "현금 보관분" : "은행 계좌";
+        const cur = byAccount[account];
+        if (cur) {
+          return h("div", { class: "line" },
+            h("div", { class: "head" }, h("b", {}, label), h("span", {}, `${cur.as_of_date} 기준`)),
+            h("div", { class: "row" },
+              h("div", {}, h("b", { style: "font-size:18px" }, money(cur.amount_cents)), cur.note ? h("div", { class: "muted" }, cur.note) : null),
+              h("div", { class: "shrink editor-only" }, h("button", { type: "button", class: "danger small", onclick: (e) => {
+                const reason = prompt(`${label} 시작 잔액 ${money(cur.amount_cents)}을 취소합니다. 사유를 입력하세요.`);
+                if (reason === null) return;
+                act(e.currentTarget, async () => { await api("POST", `/api/opening-balances/${cur.id}/void`, { reason }); await load(); });
+              } }, "취소"))));
+        }
+        const date = h("input", { type: "date", value: ymd(new Date()) });
+        const amount = h("input", { inputmode: "decimal", placeholder: "0.00" });
+        const note = h("input", { placeholder: "메모 (선택)", maxlength: 300 });
+        const save = h("button", { type: "button" }, "저장");
+        save.onclick = () =>
+          act(save, async () => {
+            const cents = toCents(amount.value, { allowNegative: true });
+            if (cents === null) throw new Error("금액이 올바르지 않습니다. (예: 12500 또는 12500.50)");
+            if (!confirm(`${label} 시작 잔액을 ${date.value} 기준 ${money(cents)}으로 저장할까요?`)) return;
+            await api("POST", "/api/opening-balances", { account, as_of_date: date.value, amount_cents: cents, note: note.value || undefined });
+            toast("저장했습니다.");
+            await load();
+          });
+        return h("div", { class: "line" },
+          h("div", { class: "head" }, h("b", {}, label), h("span", {}, "미입력")),
+          h("div", { class: "grid editor-only" },
+            h("div", { class: "row" }, h("div", {}, h("label", {}, "기준일"), date), h("div", {}, h("label", {}, "금액 ($)"), amount)),
+            note, save));
+      }),
+    );
+  };
+  const card = h("div", { class: "card" },
+    h("h3", {}, "시작 잔액"),
+    h("p", { class: "muted" }, "합병 후 장부를 시작하는 시점의 실제 보유 금액입니다. 잘못 입력했다면 취소한 뒤 다시 입력하세요."),
+    body);
+  return { card, load };
+}
+
+async function renderSettings() {
+  const cards = [
+    openingBalanceCard(),
+    lookupCard("헌금 종류", "/api/fund-types"),
+    lookupCard("부서", "/api/departments"),
+    lookupCard("지출 항목", "/api/expense-categories"),
+  ];
+  const s = state.settings;
+  view.replaceChildren(
+    h("h2", {}, "설정"),
+    h("div", { class: "card" },
+      h("h3", {}, "기본 정보"),
+      h("ul", { class: "list" },
+        h("li", {}, h("span", {}, "교회"), h("b", {}, s.church_name ?? "")),
+        h("li", {}, h("span", {}, "교회 회계연도 시작"), h("b", {}, `${s.church_fiscal_year_start_month ?? "?"}월`)),
+        h("li", {}, h("span", {}, "호주 보고 연도 시작"), h("b", {}, `${s.au_fiscal_year_start_month ?? "?"}월`)),
+        h("li", {}, h("span", {}, "내 계정"), h("b", {}, `${state.me.name} · ${isEditor() ? "기록 담당" : "열람"}`)))),
+    ...cards.map((c) => c.card),
+  );
+  await act(null, () => Promise.all(cards.map((c) => c.load())));
+}
+
+// ---------- 기록 ----------
+
+const TABLE_NAMES = {
+  fund_types: "헌금 종류", departments: "부서", expense_categories: "지출 항목",
+  opening_balances: "시작 잔액", members: "성도", offerings: "헌금",
+};
+const ACTION_NAMES = { create: "추가", update: "수정", void: "취소" };
+
+function describe(entry) {
+  const a = entry.after ?? {};
+  const b = entry.before ?? {};
+  const parts = [];
+  if (a.name) parts.push(b.name && b.name !== a.name ? `${b.name} → ${a.name}` : a.name);
+  if (a.amount_cents !== undefined) parts.push(money(a.amount_cents));
+  if (entry.action === "void") parts.push(b.amount_cents !== undefined ? money(b.amount_cents) : "", `사유: ${a.void_reason ?? ""}`);
+  if (a.is_active !== undefined && b.is_active !== undefined && a.is_active !== b.is_active) parts.push(a.is_active ? "다시 사용" : "사용 중지");
+  if (a.offering_date) parts.push(a.offering_date);
+  return parts.filter(Boolean).join(" · ");
+}
+
+async function renderAudit() {
+  const list = h("ul", { class: "list" });
+  const more = h("button", { type: "button", class: "secondary mt" }, "더 보기");
+  let lastId = 0;
+  const load = async () => {
+    const rows = await api("GET", `/api/audit-log?limit=50${lastId ? `&before_id=${lastId}` : ""}`);
+    if (!rows.length && !lastId) list.append(h("li", { class: "muted" }, "기록이 없습니다."));
+    for (const r of rows) {
+      list.append(h("li", {}, h("div", { class: "grow" },
+        h("div", {}, h("span", { class: "tag" }, TABLE_NAMES[r.table_name] ?? r.table_name), " ", h("b", {}, ACTION_NAMES[r.action] ?? r.action), " ", describe(r)),
+        h("div", { class: "muted" }, `${new Date(r.at).toLocaleString("ko-KR")} · ${r.user_email}`))));
+    }
+    if (rows.length) lastId = rows[rows.length - 1].id;
+    more.hidden = rows.length < 50;
+  };
+  more.onclick = () => act(more, load);
+  view.replaceChildren(h("h2", {}, "변경 기록"), h("p", { class: "muted" }, "누가, 언제, 무엇을 바꿨는지 모두 남습니다. 지울 수 없습니다."), h("div", { class: "card" }, list), more);
+  await act(null, load);
+}
+
+// ---------- routing ----------
+
+const routes = { entry: renderEntry, offerings: renderOfferings, members: renderMembers, settings: renderSettings, audit: renderAudit };
+
+async function route() {
+  const tab = location.hash.slice(1) in routes ? location.hash.slice(1) : isEditor() ? "entry" : "offerings";
+  for (const a of document.querySelectorAll(".tabs a")) a.classList.toggle("on", a.dataset.tab === tab);
+  view.replaceChildren(h("p", { class: "muted" }, "불러오는 중…"));
+  try {
+    await routes[tab]();
+  } catch (err) {
+    view.replaceChildren(h("p", { class: "notice" }, err.message));
+  }
+}
+
+async function start() {
+  try {
+    [state.me, state.settings] = await Promise.all([api("GET", "/api/me"), api("GET", "/api/settings")]);
+  } catch (err) {
+    view.replaceChildren(h("h2", {}, "로그인할 수 없습니다"), h("p", { class: "notice" }, err.message));
+    return;
+  }
+  document.body.classList.toggle("viewer", !isEditor());
+  document.getElementById("church-name").textContent = state.settings.church_name || "교회 회계";
+  document.title = `${state.settings.church_name || "교회"} 회계`;
+  document.getElementById("who").textContent = `${state.me.name} · ${isEditor() ? "기록 담당" : "열람"}`;
+  window.addEventListener("hashchange", route);
+  route();
+}
+
+start();

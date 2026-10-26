@@ -2,6 +2,8 @@
   "name": "church-accounting",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
+  // The screens (HTML/JS/CSS) contain no data; all data comes from /api, which requires login.
+  "assets": { "directory": "./public" },
   "d1_databases": [
     {
       "binding": "DB",

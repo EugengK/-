@@ -1,6 +1,6 @@
 # 교회 회계 프로그램 (호바트한인교회)
 
-Cloudflare Workers + D1 기반 백엔드. 현재는 **1단계**(DB 구조, 로그인·권한, 기본 설정, 시작 잔액)까지 구현되어 있습니다.
+Cloudflare Workers + D1 기반 백엔드. 현재 **2단계**까지 구현되어 있습니다: DB 구조, 로그인·권한, 기본 설정, 시작 잔액, 성도 명부, 헌금 입력·내역, 변경 기록, 핸드폰용 화면.
 기획은 [docs/PLAN.md](docs/PLAN.md) 참고.
 
 ## 구현된 API (모두 로그인 필요, `/api/health` 제외)
@@ -13,6 +13,9 @@ Cloudflare Workers + D1 기반 백엔드. 현재는 **1단계**(DB 구조, 로�
 | `/api/departments` | 부서 | 기록 담당 |
 | `/api/expense-categories` | 지출 항목 | 기록 담당 |
 | `/api/opening-balances` | 시작 잔액 (현금/은행 각 1건, 수정 대신 취소 후 재입력) | 기록 담당 |
+| `/api/members` | 성도 명부 (조회·검색·추가·수정·비활성화, 동명이인 허용) | 기록 담당 |
+| `/api/offerings` | 헌금 (한 번에 여러 줄 저장, 기간·종류·성도·방식 조회, 취소) | 기록 담당 |
+| `GET /api/offerings/summary` | 종류별·현금/온라인별 합계 (`member_id`로 개인별 합계) | - |
 | `GET /api/audit-log` | 변경 기록 (누가·언제·무엇을, 이전/이후 값) | - |
 
 권한: `editor`(기록 담당)만 쓰기 가능, `viewer`(열람)는 조회만 가능. 삭제 기능은 없고 비활성화/취소 처리만 합니다.
@@ -27,8 +30,11 @@ npm run typecheck
 cp .dev.vars.example .dev.vars
 npm run db:migrate:local
 npx wrangler d1 execute church-accounting --local --file scripts/seed-dev.sql
-npm run dev                    # http://localhost:8787/api/me
+npm run dev                    # 브라우저에서 http://localhost:8787 을 엽니다
 ```
+
+열람 권한 화면을 보려면 `.dev.vars`의 `DEV_AUTH_EMAIL`을 열람 사용자 이메일로 바꾸고 그 사용자를 `users`에 추가한 뒤 다시 실행하세요.
+로컬 데이터는 `.wrangler/` 폴더에만 저장됩니다. 시험용으로만 쓰세요.
 
 ## 배포 (아직 한 번도 실제 Cloudflare에 배포해 보지 않았습니다)
 

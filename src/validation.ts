@@ -18,6 +18,17 @@ export const name = z.string().transform((v) => v.normalize("NFC")).pipe(z.strin
 /** Whole cents only; capped so JSON numbers stay exact. */
 export const cents = z.number().int("센트 단위 정수여야 합니다.").min(-1e11).max(1e11);
 
+/** Optional free text: trimmed, NFC-normalised; "" or null clears it (stored as NULL). */
+export function optionalText(max: number) {
+  return z
+    .string()
+    .transform((v) => v.normalize("NFC").trim())
+    .pipe(z.string().max(max, `${max}자 이하로 입력하세요.`))
+    .transform((v) => (v === "" ? null : v))
+    .nullable()
+    .optional();
+}
+
 export const reason = z
   .string()
   .transform((v) => v.normalize("NFC"))

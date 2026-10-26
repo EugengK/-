@@ -3,6 +3,8 @@ import { HTTPException } from "hono/http-exception";
 import { accessVerifier, authenticate, guardWrites } from "./auth";
 import { lookupRoutes } from "./routes/lookups";
 import { auditRoutes, meRoutes, settingsRoutes, userRoutes } from "./routes/misc";
+import { memberRoutes } from "./routes/members";
+import { offeringRoutes } from "./routes/offerings";
 import { openingBalanceRoutes } from "./routes/openingBalances";
 import type { AppEnv, TokenVerifier } from "./types";
 
@@ -24,6 +26,8 @@ export function createApp(verify: TokenVerifier = accessVerifier) {
   app.route("/api/departments", lookupRoutes("departments"));
   app.route("/api/expense-categories", lookupRoutes("expense_categories"));
   app.route("/api/opening-balances", openingBalanceRoutes);
+  app.route("/api/members", memberRoutes);
+  app.route("/api/offerings", offeringRoutes);
 
   app.notFound((c) => c.json({ error: "찾을 수 없습니다." }, 404));
   app.onError((err, c) => {
