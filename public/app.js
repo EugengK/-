@@ -26,12 +26,15 @@ function h(tag, attrs = {}, ...children) {
 const moneyFmt = new Intl.NumberFormat("en-AU", { style: "currency", currency: "AUD" });
 const money = (cents) => moneyFmt.format(cents / 100);
 
-/** "1,234.5" / "$20" -> cents. Exact (no floating point). Returns null if not a valid amount. */
+/**
+ * "1,234.5" / "$20" -> cents. Exact (no floating point). Returns null if not a valid amount.
+ * Commas are only accepted as thousands separators, so "20,50" is rejected rather than read as 2050.
+ */
 function toCents(text, { allowNegative = false } = {}) {
-  const s = String(text).replace(/[\s,$]/g, "");
-  const m = /^(-)?(\d{1,10})(?:\.(\d{1,2}))?$/.exec(s);
+  const s = String(text).replace(/[\s$]/g, "");
+  const m = /^(-)?(\d{1,3}(?:,\d{3})+|\d{1,10})(?:\.(\d{1,2}))?$/.exec(s);
   if (!m || (m[1] && !allowNegative)) return null;
-  const cents = Number(m[2]) * 100 + Number((m[3] ?? "").padEnd(2, "0"));
+  const cents = Number(m[2].replace(/,/g, "")) * 100 + Number((m[3] ?? "").padEnd(2, "0"));
   return m[1] ? -cents : cents;
 }
 
@@ -155,7 +158,8 @@ function lineEditor(onChange) {
   return line;
 }
 
-async function renderEntry() {
+/** keepDate: after a save, stay on the same date so a second batch for that day isn't misdated. */
+async function renderEntry(keepDate) {
   if (!isEditor()) {
     view.replaceChildren(h("h2", {}, "헌금 입력"), h("p", { class: "notice" }, "열람 권한으로 로그인되어 있어 입력할 수 없습니다. '헌금 내역'에서 확인하세요."));
     return;
@@ -166,7 +170,9 @@ async function renderEntry() {
     return;
   }
   const lines = [];
-  const date = h("input", { type: "date", value: lastSunday(), "aria-label": "날짜" });
+  const date = h("input", { type: "date", value: keepDate || lastSunday(), "aria-label": "날짜" });
+  // Same key on every retry of this form, so a resend after a dropped connection is not saved twice.
+  const clientKey = crypto.randomUUID();
   const list = h("div");
   const totalCash = h("b", {}, money(0));
   const totalOnline = h("b", {}, money(0));
@@ -201,14 +207,14 @@ async function renderEntry() {
     act(save, async () => {
       const filled = lines.filter((l) => !l.isBlank());
       if (!filled.length) throw new Error("금액을 입력하세요.");
-      const bad = filled.findIndex((l) => l.cents() === null || l.cents() <= 0);
-      if (bad >= 0) throw new Error(`${bad + 1}번째 줄 금액이 올바르지 않습니다. (예: 20 또는 20.50)`);
+      const bad = lines.findIndex((l) => !l.isBlank() && (l.cents() === null || l.cents() <= 0));
+      if (bad >= 0) throw new Error(`${bad + 1}번째 줄 금액이 올바르지 않습니다. (예: 20, 20.50, 1,200)`);
       const entries = filled.map((l) => l.value());
       const total = entries.reduce((s, e) => s + e.amount_cents, 0);
       if (!confirm(`${date.value} 헌금 ${entries.length}건, 합계 ${money(total)}을 저장할까요?`)) return;
-      await api("POST", "/api/offerings", { offering_date: date.value, entries });
-      toast(`저장했습니다: ${entries.length}건, ${money(total)}`);
-      renderEntry();
+      await api("POST", "/api/offerings", { offering_date: date.value, entries, client_key: clientKey });
+      toast(`${date.value} 헌금 저장: ${entries.length}건, ${money(total)}`);
+      renderEntry(date.value);
     });
 
   view.replaceChildren(
@@ -232,21 +238,30 @@ async function renderEntry() {
 // ---------- 헌금 내역 ----------
 
 async function renderOfferings() {
-  await loadFunds();
+  // Include stopped types so old offerings recorded under them can still be filtered.
+  const allFunds = await api("GET", "/api/fund-types?include_inactive=1");
   const r = monthRange();
   const from = h("input", { type: "date", value: r.from, "aria-label": "시작일" });
   const to = h("input", { type: "date", value: r.to, "aria-label": "종료일" });
-  const fund = h("select", { "aria-label": "헌금 종류" }, h("option", { value: "" }, "전체 종류"), state.funds.map((f) => h("option", { value: f.id }, f.name)));
+  const fund = h("select", { "aria-label": "헌금 종류" }, h("option", { value: "" }, "전체 종류"), allFunds.map((f) => h("option", { value: f.id }, f.is_active ? f.name : `${f.name} (사용 중지)`)));
   const showVoid = h("input", { type: "checkbox", style: "width:auto;min-height:0" });
   const out = h("div");
 
+  // Each change starts a new load; an older, slower response must not overwrite a newer one.
+  let seq = 0;
   const load = async () => {
+    const mine = ++seq;
+    if (from.value && to.value && from.value > to.value) {
+      out.replaceChildren(h("p", { class: "notice" }, "시작일이 종료일보다 늦습니다. 날짜를 확인하세요."));
+      return;
+    }
     const q = new URLSearchParams({ from: from.value, to: to.value });
     if (fund.value) q.set("fund_type_id", fund.value);
     const [sum, rows] = await Promise.all([
       api("GET", `/api/offerings/summary?${q}`),
       api("GET", `/api/offerings?${q}${showVoid.checked ? "&include_void=1" : ""}`),
     ]);
+    if (mine !== seq) return;
     const byFund = new Map();
     for (const s of sum.rows) {
       const e = byFund.get(s.fund_type_id) ?? { name: s.fund_type_name, cash: 0, online: 0 };
@@ -268,6 +283,7 @@ async function renderOfferings() {
       rows.length
         ? h("div", { class: "card" },
             h("h3", {}, `상세 (${rows.length}건)`),
+            rows.length >= 1000 ? h("p", { class: "notice" }, "상세 목록은 최근 1000건까지만 보입니다. 기간을 줄여 보세요. (위 합계는 전체 기준입니다.)") : null,
             h("table", {},
               h("tbody", {}, rows.map((o) =>
                 h("tr", { class: o.status === "void" ? "void-row" : "" },
@@ -329,7 +345,7 @@ async function renderMembers() {
                 h("button", { type: "button", class: "secondary small", onclick: (e) => editMember(e.currentTarget, m, load) }, "수정"),
                 h("button", { type: "button", class: "danger small", onclick: (e) =>
                   act(e.currentTarget, async () => {
-                    await api("PATCH", `/api/members/${m.id}`, { is_active: !m.is_active });
+                    await api("PATCH", `/api/members/${m.id}`, { is_active: !m.is_active, expected: { is_active: m.is_active } });
                     await load();
                   }) }, m.is_active ? "비활성화" : "다시 사용"))))
         : [h("li", { class: "muted" }, "성도가 없습니다.")]),
@@ -368,8 +384,15 @@ function editMember(btn, m, after) {
   if (phone === null) return;
   const note = prompt("메모 (비우면 삭제)", m.note ?? "");
   if (note === null) return;
+  // Send only what changed, plus what the screen showed, so another editor's change is not overwritten.
+  const body = {};
+  if (name.trim() !== m.name) body.name = name;
+  if (phone.trim() !== (m.phone ?? "")) body.phone = phone;
+  if (note.trim() !== (m.note ?? "")) body.note = note;
+  if (!Object.keys(body).length) return;
+  body.expected = { name: m.name, phone: m.phone, note: m.note };
   act(btn, async () => {
-    await api("PATCH", `/api/members/${m.id}`, { name, phone, note });
+    await api("PATCH", `/api/members/${m.id}`, body);
     toast("수정했습니다.");
     await after();
   });

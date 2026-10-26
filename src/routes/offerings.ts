@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { auditStatement } from "../audit";
 import type { AppEnv } from "../types";
-import { isRealDate, isoDate, optionalText, parseBody, reason } from "../validation";
+import { isRealDate, isUniqueViolation, isoDate, optionalText, parseBody, reason } from "../validation";
 
 interface OfferingRow {
   id: number;
@@ -43,10 +43,19 @@ const createSchema = z
   .object({
     offering_date: isoDate,
     entries: z.array(entrySchema).min(1, "헌금 내역을 1건 이상 입력하세요.").max(MAX_ENTRIES),
+    client_key: z.string().regex(/^[A-Za-z0-9-]{8,64}$/).optional(),
   })
   .strict();
 
 const voidSchema = z.object({ reason }).strict();
+
+/** Rows already saved under this form key, or null if the key is new. */
+async function findBatch(db: D1Database, key: string): Promise<OfferingRow[] | null> {
+  const batch = await db.prepare("SELECT client_key FROM offering_batches WHERE client_key = ?").bind(key).first();
+  if (!batch) return null;
+  const { results } = await db.prepare(`${SELECT} WHERE o.batch_key = ? ORDER BY o.id`).bind(key).all<OfferingRow>();
+  return results;
+}
 
 /** Shared filter parsing for list and summary. */
 function filters(q: (k: string) => string | undefined) {
@@ -137,7 +146,16 @@ offeringRoutes.post("/", async (c) => {
     }
   }
 
+  const key = body.client_key ?? null;
+  if (key) {
+    const existing = await findBatch(db, key);
+    if (existing) return c.json(existing, 200);
+  }
+
   const statements: D1PreparedStatement[] = [];
+  if (key) {
+    statements.push(db.prepare("INSERT INTO offering_batches (client_key, created_by) VALUES (?, ?)").bind(key, user.id));
+  }
   for (const e of body.entries) {
     const row = {
       offering_date: body.offering_date,
@@ -150,17 +168,31 @@ offeringRoutes.post("/", async (c) => {
     statements.push(
       db
         .prepare(
-          `INSERT INTO offerings (offering_date, fund_type_id, amount_cents, method, member_id, note, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO offerings (offering_date, fund_type_id, amount_cents, method, member_id, note, created_by, batch_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .bind(row.offering_date, row.fund_type_id, row.amount_cents, row.method, row.member_id, row.note, user.id),
+        .bind(row.offering_date, row.fund_type_id, row.amount_cents, row.method, row.member_id, row.note, user.id, key),
       // Before the audit INSERT, which moves last_insert_rowid() on.
       db.prepare(`${SELECT} WHERE o.id = last_insert_rowid()`),
       auditStatement(db, user, "create", "offerings", "last_insert", undefined, row),
     );
   }
-  const results = await db.batch(statements);
-  const created = results.filter((_, i) => i % 3 === 1).map((r) => r.results[0] as OfferingRow);
+  let results: D1Result[];
+  try {
+    results = await db.batch(statements);
+  } catch (err) {
+    // Two sends of the same form raced; the other one won. Report what it saved.
+    if (key && isUniqueViolation(err)) {
+      const existing = await findBatch(db, key);
+      if (existing) return c.json(existing, 200);
+    }
+    throw err;
+  }
+  const offset = key ? 1 : 0;
+  const created = results
+    .slice(offset)
+    .filter((_, i) => i % 3 === 1)
+    .map((r) => r.results[0] as OfferingRow);
   return c.json(created, 201);
 });
 

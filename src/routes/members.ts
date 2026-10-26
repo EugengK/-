@@ -24,10 +24,29 @@ const fields = {
 
 const createSchema = z.object({ name, ...fields }).strict();
 
+/**
+ * `expected` = the values the editor's screen showed. If the stored row no longer matches
+ * (someone else changed it since), the update is refused instead of overwriting their change.
+ */
 const updateSchema = z
-  .object({ name: name.optional(), ...fields, is_active: z.boolean().optional() })
+  .object({
+    name: name.optional(),
+    ...fields,
+    is_active: z.boolean().optional(),
+    expected: z
+      .object({
+        name: z.string(),
+        phone: z.string().nullable(),
+        email: z.string().nullable(),
+        note: z.string().nullable(),
+        is_active: z.boolean(),
+      })
+      .partial()
+      .strict()
+      .optional(),
+  })
   .strict()
-  .refine((v) => Object.keys(v).length > 0, "바꿀 내용을 입력하세요.");
+  .refine((v) => Object.keys(v).some((k) => k !== "expected"), "바꿀 내용을 입력하세요.");
 
 const out = (r: MemberRow) => ({ ...r, is_active: r.is_active === 1 });
 
@@ -42,7 +61,7 @@ memberRoutes.get("/", async (c) => {
   if (!all) where.push("is_active = 1");
   if (q) {
     // instr() instead of LIKE so % and _ in the search text are taken literally.
-    where.push("instr(name, ?) > 0");
+    where.push("instr(lower(name), lower(?)) > 0");
     binds.push(q);
   }
   const { results } = await c.env.DB.prepare(
@@ -75,6 +94,11 @@ memberRoutes.patch("/:id{[0-9]+}", async (c) => {
   const body = await parseBody(c, updateSchema);
   const before = await c.env.DB.prepare(`SELECT ${COLUMNS} FROM members WHERE id = ?`).bind(id).first<MemberRow>();
   if (!before) throw new HTTPException(404, { message: "찾을 수 없습니다." });
+  const STALE = "다른 사람이 먼저 수정했습니다. 새로고침 후 다시 시도하세요.";
+  for (const [k, v] of Object.entries(body.expected ?? {})) {
+    const current = k === "is_active" ? before.is_active === 1 : before[k as keyof MemberRow];
+    if (current !== v) throw new HTTPException(409, { message: STALE });
+  }
 
   const next = {
     name: body.name ?? before.name,
@@ -83,7 +107,7 @@ memberRoutes.patch("/:id{[0-9]+}", async (c) => {
     note: body.note === undefined ? before.note : body.note,
     is_active: body.is_active === undefined ? before.is_active : body.is_active ? 1 : 0,
   };
-  // Guarded on the values we read so a concurrent edit is never silently overwritten.
+  // Guarded on the values read above, so an edit landing in between is not overwritten either.
   const [updated] = await c.env.DB.batch([
     c.env.DB.prepare(
       `UPDATE members SET name = ?, phone = ?, email = ?, note = ?, is_active = ?
@@ -103,8 +127,6 @@ memberRoutes.patch("/:id{[0-9]+}", async (c) => {
     ),
     auditStatement(c.env.DB, c.get("user"), "update", "members", id, before, { id, ...next }, true),
   ]);
-  if (updated!.meta.changes === 0) {
-    throw new HTTPException(409, { message: "다른 사람이 먼저 수정했습니다. 새로고침 후 다시 시도하세요." });
-  }
+  if (updated!.meta.changes === 0) throw new HTTPException(409, { message: STALE });
   return c.json(out({ id, ...next }));
 });

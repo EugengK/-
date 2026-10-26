@@ -168,3 +168,70 @@ describe("offerings", () => {
     expect((await call("DELETE", "/api/offerings/1", { as: EDITOR })).status).toBe(404);
   });
 });
+
+describe("phase 2 review fixes", () => {
+  beforeEach(resetDb);
+  const line = { fund_type_id: 1, amount_cents: 1000, method: "cash" };
+
+  it("saves a form only once when it is resent with the same key (retry after a dropped reply)", async () => {
+    const body = { offering_date: "2026-11-01", entries: [line, { ...line, amount_cents: 2000 }], client_key: "form-1234-abcd" };
+    const first = await call("POST", "/api/offerings", { as: EDITOR, body });
+    expect(first.status).toBe(201);
+    const again = await call("POST", "/api/offerings", { as: EDITOR, body });
+    expect(again.status).toBe(200);
+    expect((await json(again)).map((r: any) => r.id)).toEqual((await json(first)).map((r: any) => r.id));
+    expect(await count("SELECT COUNT(*) AS n FROM offerings")).toBe(2);
+    expect(await count("SELECT COUNT(*) AS n FROM audit_log WHERE table_name='offerings'")).toBe(2);
+  });
+
+  it("saves once when two identical sends race", async () => {
+    const body = { offering_date: "2026-11-01", entries: [line], client_key: "race-key-0001" };
+    const res = await Promise.all([1, 2].map(() => call("POST", "/api/offerings", { as: EDITOR, body })));
+    expect(res.map((r) => r.status).sort()).toEqual([200, 201]);
+    expect(await count("SELECT COUNT(*) AS n FROM offerings")).toBe(1);
+  });
+
+  it("different keys are different forms; bad keys are rejected", async () => {
+    for (const k of ["k-000000001", "k-000000002"]) {
+      expect((await call("POST", "/api/offerings", { as: EDITOR, body: { offering_date: "2026-11-01", entries: [line], client_key: k } })).status).toBe(201);
+    }
+    for (const k of ["short", "has space here", "x".repeat(65)]) {
+      expect((await call("POST", "/api/offerings", { as: EDITOR, body: { offering_date: "2026-11-01", entries: [line], client_key: k } })).status).toBe(400);
+    }
+  });
+
+  it("refuses a member edit made from a stale screen", async () => {
+    const m = await member("최", { phone: "111" });
+    // Editor 2 changes the phone.
+    await call("PATCH", `/api/members/${m.id}`, { as: EDITOR2, body: { phone: "222", expected: { phone: "111" } } });
+    // Editor 1 still sees phone 111 and edits the note.
+    const stale = await call("PATCH", `/api/members/${m.id}`, {
+      as: EDITOR,
+      body: { note: "메모", expected: { name: "최", phone: "111", note: null } },
+    });
+    expect(stale.status).toBe(409);
+    const row = await db.prepare("SELECT phone, note FROM members WHERE id = ?").bind(m.id).first<any>();
+    expect(row).toEqual({ phone: "222", note: null });
+    expect((await call("PATCH", `/api/members/${m.id}`, { as: EDITOR, body: { expected: { phone: "222" } } })).status).toBe(400);
+    expect((await call("PATCH", `/api/members/${m.id}`, { as: EDITOR, body: { note: "x", expected: { bogus: 1 } } })).status).toBe(400);
+  });
+
+  it("member search ignores ASCII case", async () => {
+    await member("John Kim");
+    expect(await json(await call("GET", "/api/members?q=john", { as: PASTOR }))).toHaveLength(1);
+  });
+
+  it("viewers cannot post offerings or edit members", async () => {
+    const m = await member("정");
+    expect((await call("POST", "/api/offerings", { as: PASTOR, body: { offering_date: "2026-11-01", entries: [line] } })).status).toBe(403);
+    expect((await call("PATCH", `/api/members/${m.id}`, { as: PASTOR, body: { name: "x" } })).status).toBe(403);
+  });
+
+  it("summary filtered by fund type still counts a type that was later stopped", async () => {
+    await call("POST", "/api/offerings", { as: EDITOR, body: { offering_date: "2026-11-01", entries: [{ ...line, fund_type_id: 5 }, line] } });
+    await call("PATCH", "/api/fund-types/5", { as: EDITOR, body: { is_active: false } });
+    const s = await json(await call("GET", "/api/offerings/summary?fund_type_id=5", { as: PASTOR }));
+    expect(s.total_cents).toBe(1000);
+    expect((await json(await call("GET", "/api/offerings/summary", { as: PASTOR }))).total_cents).toBe(2000);
+  });
+});

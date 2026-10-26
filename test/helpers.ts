@@ -21,6 +21,7 @@ export async function resetDb() {
     "expense_items",
     "expenses",
     "offerings",
+    "offering_batches",
     "budgets",
     "opening_balances",
     "members",
@@ -31,6 +32,7 @@ export async function resetDb() {
     await db.prepare(`DELETE FROM ${t}`).run();
   }
   await db.prepare("DELETE FROM fund_types WHERE id > 6").run();
+  await db.prepare("UPDATE fund_types SET is_active = 1").run();
   await db.batch([
     db.prepare("INSERT INTO users (email, name, role) VALUES (?, ?, 'editor')").bind(EDITOR, "기록1"),
     db.prepare("INSERT INTO users (email, name, role) VALUES (?, ?, 'editor')").bind(EDITOR2, "기록2"),
