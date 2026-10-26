@@ -22,6 +22,7 @@ export async function resetDb() {
     "member_status_events",
     "expense_items",
     "expenses",
+    "recurring_expenses",
     "offerings",
     "offering_batches",
     "budgets",
@@ -43,6 +44,7 @@ export async function resetDb() {
     // The pastor reads the finances and manages the registry.
     db.prepare("INSERT INTO users (email, name, role, registry_admin) VALUES (?, ?, 'viewer', 1)").bind(PASTOR, "담임목사"),
     db.prepare("INSERT INTO users (email, name, role, is_active) VALUES ('sheet-sync@system.local', '목양 시트 자동 연동', 'viewer', 0)"),
+    db.prepare("INSERT INTO users (email, name, role, is_active) VALUES ('scheduler@system.local', '고정 지출 자동 등록', 'viewer', 0)"),
   ]);
 }
 

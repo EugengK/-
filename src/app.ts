@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { accessVerifier, authenticate, guardWrites } from "./auth";
+import { expenseRoutes, recurringRoutes } from "./routes/expenses";
 import { lookupRoutes } from "./routes/lookups";
 import { auditRoutes, meRoutes, settingsRoutes, userRoutes } from "./routes/misc";
 import { memberRoutes } from "./routes/members";
@@ -34,6 +35,8 @@ export function createApp(verify: TokenVerifier = accessVerifier) {
   app.route("/api/members", memberRoutes);
   app.route("/api/offerings", offeringRoutes);
   app.route("/api/registry", registryRoutes);
+  app.route("/api/expenses", expenseRoutes);
+  app.route("/api/recurring-expenses", recurringRoutes);
 
   app.notFound((c) => c.json({ error: "찾을 수 없습니다." }, 404));
   app.onError((err, c) => {

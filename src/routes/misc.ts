@@ -19,7 +19,7 @@ meRoutes.get("/", (c) => c.json(c.get("user")));
 export const userRoutes = new Hono<AppEnv>();
 userRoutes.get("/", async (c) => {
   const { results } = await c.env.DB.prepare(
-    "SELECT id, email, name, role, registry_admin, is_active FROM users WHERE email != 'sheet-sync@system.local' ORDER BY id",
+    "SELECT id, email, name, role, registry_admin, is_active FROM users WHERE email NOT LIKE '%@system.local' ORDER BY id",
   ).all<{ id: number; email: string; name: string; role: string; registry_admin: number; is_active: number }>();
   return c.json(results.map((u) => ({ ...u, registry_admin: u.registry_admin === 1, is_active: u.is_active === 1 })));
 });

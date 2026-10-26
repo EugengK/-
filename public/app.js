@@ -412,6 +412,248 @@ async function voidOffering(btn, o, after) {
   });
 }
 
+// ---------- 지출 ----------
+
+const accountTag = (a) => h("span", { class: `tag ${a === "cash" ? "cash" : "online"}` }, a === "cash" ? "현금" : "은행");
+const EXPENSE_STATUS = { planned: "예정", confirmed: "지급", draft: "확인 전", void: "취소됨" };
+const WEEKDAY_NAMES = ["일", "월", "화", "수", "목", "금", "토"];
+
+/** Marks a planned fixed cost as paid, asking for the actual amount (prefilled). */
+async function payPlanned(btn, e, after) {
+  const text = await ask(`${e.expense_date} ${e.recurring_name ?? e.vendor}\n지급 금액을 확인하세요. (바뀌었다면 고쳐서 저장)`, {
+    input: (e.total_cents / 100).toFixed(2), okText: "지급 완료", cancelText: "닫기",
+  });
+  if (text === null) return;
+  await act(btn, async () => {
+    const cents = toCents(text);
+    if (cents === null || cents <= 0) throw new Error("금액이 올바르지 않습니다.");
+    await api("POST", `/api/expenses/${e.id}/pay`, { total_cents: cents });
+    toast(`지급 완료: ${e.recurring_name ?? e.vendor} ${money(cents)}`);
+    await after();
+  });
+}
+
+async function voidExpense(btn, e, after) {
+  const planned = e.status === "planned";
+  const reason = await ask(`${e.expense_date} ${e.recurring_name ?? e.vendor} ${money(e.total_cents)}\n${planned ? "이번 회차를 건너뜁니다." : "이 지출을 취소합니다."} 사유를 입력하세요.`, {
+    input: "", okText: planned ? "건너뛰기" : "취소 처리", cancelText: "닫기",
+  });
+  if (reason === null) return;
+  await act(btn, async () => {
+    await api("POST", `/api/expenses/${e.id}/void`, { reason });
+    toast(planned ? "건너뛰었습니다." : "취소했습니다.");
+    await after();
+  });
+}
+
+/** Opens once a day for finance editors: fixed costs due this week (and any overdue). */
+async function remindDue() {
+  if (!isEditor()) return;
+  const key = `due-reminder-${new Date().toDateString()}`;
+  try { if (localStorage.getItem(key)) return; } catch { /* storage blocked: just remind */ }
+  let due;
+  try { due = await api("GET", "/api/expenses/due"); } catch { return; }
+  if (!due.items.length) return;
+  try { localStorage.setItem(key, "1"); } catch { /* ignore */ }
+  const dlg = h("dialog", { class: "ask" });
+  const close = () => { dlg.close(); dlg.remove(); };
+  const list = h("ul", { class: "list" });
+  const fill = (items) =>
+    list.replaceChildren(...items.map((e) =>
+      h("li", {},
+        h("div", { class: "grow" },
+          h("b", {}, e.recurring_name ?? e.vendor), " ", accountTag(e.account),
+          h("div", { class: e.overdue ? "" : "muted", style: e.overdue ? "color:var(--danger)" : "" },
+            `${e.expense_date}${e.overdue ? " · 지났음" : ""} · ${money(e.total_cents)}`)),
+        h("button", { type: "button", class: "small", onclick: async (ev) => {
+          const btn = ev.currentTarget;
+          dlg.close();
+          await payPlanned(btn, e, async () => {});
+          const fresh = await api("GET", "/api/expenses/due");
+          if (!fresh.items.length) return close();
+          fill(fresh.items);
+          dlg.showModal();
+        } }, "지급 완료"))));
+  fill(due.items);
+  dlg.append(
+    h("h3", {}, "이번 주 고정 지출"),
+    h("p", { class: "muted" }, "지급했으면 '지급 완료'를 누르세요. 자동이체도 실제로 나갔는지 확인한 뒤 누르시면 됩니다."),
+    list,
+    h("div", { class: "row mt" }, h("button", { type: "button", class: "secondary", onclick: () => { close(); location.hash = "#expenses"; } }, "지출 탭에서 보기"), h("button", { type: "button", onclick: close }, "닫기")),
+  );
+  document.body.append(dlg);
+  dlg.showModal();
+}
+
+async function renderExpenses() {
+  const ticket = newTicket();
+  const [depts, cats] = await Promise.all([api("GET", "/api/departments"), api("GET", "/api/expense-categories")]);
+  const r = monthRange();
+  const from = h("input", { type: "date", value: r.from, "aria-label": "시작일" });
+  const to = h("input", { type: "date", value: r.to, "aria-label": "종료일" });
+  const out = h("div");
+  let seq = 0;
+  const load = async () => {
+    const mine = ++seq;
+    if (from.value > to.value) { out.replaceChildren(h("p", { class: "notice" }, "시작일이 종료일보다 늦습니다.")); return; }
+    const q = new URLSearchParams({ from: from.value, to: to.value });
+    const [sum, rows] = await Promise.all([api("GET", `/api/expenses/summary?${q}`), api("GET", `/api/expenses?${q}`)]);
+    if (mine !== seq) return;
+    out.replaceChildren(...[
+      h("div", { class: "card" },
+        h("div", { class: "totals" },
+          h("div", { class: "stat" }, h("b", {}, money(sum.paid_cents)), h("span", {}, "지급")),
+          h("div", { class: "stat" }, h("b", {}, money(sum.planned_cents)), h("span", {}, "예정 (고정)")),
+          h("div", { class: "stat" }, h("b", {}, money(sum.paid_cents + sum.planned_cents)), h("span", {}, "합계")))),
+      h("div", { class: "card" },
+        h("h3", {}, `지출 목록 (${rows.length}건)`),
+        rows.length
+          ? h("table", {}, h("tbody", {}, rows.map((e) =>
+              h("tr", {},
+                h("td", {}, e.expense_date, h("br"), h("span", { class: `tag ${e.status === "planned" ? "cash" : ""}` }, EXPENSE_STATUS[e.status])),
+                h("td", {}, e.recurring_name ? h("b", {}, e.recurring_name) : e.vendor, " ", accountTag(e.account),
+                  e.recurring_name && e.vendor !== e.recurring_name ? h("div", { class: "muted" }, e.vendor) : null,
+                  [e.department_name, e.category_name].some(Boolean) ? h("div", { class: "muted" }, [e.department_name, e.category_name].filter(Boolean).join(" · ")) : null,
+                  e.note && !e.recurring_name ? h("div", { class: "muted" }, e.note) : null),
+                h("td", { class: "num" }, money(e.total_cents),
+                  h("div", { class: "editor-only" },
+                    e.status === "planned" ? h("button", { type: "button", class: "small", onclick: (ev) => payPlanned(ev.currentTarget, e, load) }, "지급") : null,
+                    h("button", { type: "button", class: "mini danger-text", onclick: (ev) => voidExpense(ev.currentTarget, e, load) }, e.status === "planned" ? "건너뛰기" : "취소")))))))
+          : h("p", { class: "muted" }, "이 기간에 지출이 없습니다.")),
+    ]);
+  };
+  for (const el of [from, to]) el.addEventListener("change", () => act(null, load));
+
+  // 직접 지출 입력
+  const optSel = (label, rows) => h("select", { "aria-label": label }, h("option", { value: "" }, `${label} (선택)`), rows.map((x) => h("option", { value: x.id }, x.name)));
+  const eDate = h("input", { type: "date", value: ymd(new Date()), "aria-label": "날짜" });
+  const eVendor = h("input", { placeholder: "지급처 / 내용 (예: Coles, 간식)", maxlength: 100 });
+  const eAmount = h("input", { inputmode: "decimal", placeholder: "금액 0.00", "aria-label": "금액" });
+  const eAccount = h("select", { "aria-label": "계정" }, h("option", { value: "cash" }, "현금"), h("option", { value: "bank" }, "은행"));
+  const eDept = optSel("부서", depts), eCat = optSel("지출 항목", cats);
+  const eNote = h("input", { placeholder: "메모 (선택)", maxlength: 300 });
+  const eSave = h("button", { type: "button" }, "지출 저장");
+  eSave.onclick = () =>
+    act(eSave, async () => {
+      const cents = toCents(eAmount.value);
+      if (cents === null || cents <= 0) throw new Error("금액이 올바르지 않습니다. (예: 45.50)");
+      if (!(await ask(`${eDate.value} ${eVendor.value.trim()} ${money(cents)} 지출을 저장할까요?`, { okText: "저장" }))) return;
+      await api("POST", "/api/expenses", {
+        expense_date: eDate.value, vendor: eVendor.value, total_cents: cents, account: eAccount.value,
+        department_id: eDept.value ? Number(eDept.value) : null, category_id: eCat.value ? Number(eCat.value) : null, note: eNote.value || undefined,
+      });
+      eVendor.value = eAmount.value = eNote.value = "";
+      toast("지출을 저장했습니다.");
+      await load();
+    });
+
+  paint(ticket,
+    h("h2", {}, "지출"),
+    h("div", { class: "card" }, h("div", { class: "row" }, h("div", {}, h("label", {}, "시작일"), from), h("div", {}, h("label", {}, "종료일"), to))),
+    out,
+    h("details", { class: "card editor-only" }, h("summary", {}, h("b", {}, "직접 지출 입력")),
+      h("div", { class: "grid mt" },
+        h("div", { class: "row" }, h("div", {}, h("label", {}, "날짜"), eDate), h("div", {}, h("label", {}, "금액 ($)"), eAmount), h("div", {}, h("label", {}, "계정"), eAccount)),
+        eVendor, h("div", { class: "row" }, eDept, eCat), eNote, eSave)),
+    recurringCard(depts, cats, load),
+  );
+  await act(null, load);
+}
+
+function recurringCard(depts, cats, afterChange) {
+  const list = h("div", { class: "chips" });
+  const load = async () => {
+    const rows = await api("GET", "/api/recurring-expenses");
+    list.replaceChildren(...(rows.length
+      ? rows.map((r) =>
+          h("div", { class: `chip-item ${r.is_active ? "" : "off"}`, style: "flex-wrap:wrap" },
+            h("div", { class: "grow" }, h("b", {}, r.name), " ", accountTag(r.account),
+              h("div", { class: "muted" }, `${r.schedule} · ${money(r.amount_cents)}${r.is_active ? "" : " · 중지됨"}`)),
+            h("span", { class: "editor-only" },
+              h("button", { type: "button", class: "mini", onclick: async (ev) => {
+                const btn = ev.currentTarget;
+                const text = await ask(`${r.name}\n앞으로의 금액 (이미 잡힌 예정 금액은 지급할 때 고칩니다)`, { input: (r.amount_cents / 100).toFixed(2), okText: "변경" });
+                if (text === null) return;
+                await act(btn, async () => {
+                  const cents = toCents(text);
+                  if (cents === null || cents <= 0) throw new Error("금액이 올바르지 않습니다.");
+                  await api("PATCH", `/api/recurring-expenses/${r.id}`, { amount_cents: cents });
+                  await load();
+                });
+              } }, "금액"),
+              h("button", { type: "button", class: "mini danger-text", onclick: (ev) =>
+                act(ev.currentTarget, async () => { await api("PATCH", `/api/recurring-expenses/${r.id}`, { is_active: !r.is_active }); await load(); await afterChange(); }) },
+                r.is_active ? "중지" : "다시 사용"))))
+      : [h("p", { class: "muted" }, "등록된 고정 지출이 없습니다.")]));
+  };
+
+  // add form
+  const fName = h("input", { placeholder: "이름 (예: 담임목사 사례비, 예배당 렌트비)", maxlength: 50 });
+  const fVendor = h("input", { placeholder: "지급처 (선택)", maxlength: 100 });
+  const fAmount = h("input", { inputmode: "decimal", placeholder: "금액 0.00", "aria-label": "금액" });
+  const fAccount = h("select", { "aria-label": "계정" }, h("option", { value: "bank" }, "은행"), h("option", { value: "cash" }, "현금"));
+  const fRule = h("select", { "aria-label": "주기" },
+    h("option", { value: "monthly_weekday" }, "매월 몇째 주 무슨 요일"),
+    h("option", { value: "monthly_day" }, "매월 며칠"),
+    h("option", { value: "weekly" }, "매주 무슨 요일"),
+    h("option", { value: "fortnightly" }, "2주마다"));
+  const fNth = h("select", { "aria-label": "몇째 주" }, ["첫째", "둘째", "셋째", "넷째", "마지막"].map((t, i) => h("option", { value: i + 1 }, `${t} 주`)));
+  const fWeekday = h("select", { "aria-label": "요일" }, WEEKDAY_NAMES.map((t, i) => h("option", { value: i }, `${t}요일`)));
+  const fDay = h("select", { "aria-label": "날짜" }, Array.from({ length: 31 }, (_, i) => h("option", { value: i + 1 }, i === 30 ? "말일" : `${i + 1}일`)));
+  const fAnchor = h("input", { type: "date", "aria-label": "기준일 (한 번 낸 날)" });
+  const fStart = h("input", { type: "date", value: ymd(new Date()), "aria-label": "시작일" });
+  const fDept = h("select", { "aria-label": "부서" }, h("option", { value: "" }, "부서 (선택)"), depts.map((x) => h("option", { value: x.id }, x.name)));
+  const fCat = h("select", { "aria-label": "지출 항목" }, h("option", { value: "" }, "지출 항목 (선택)"), cats.map((x) => h("option", { value: x.id }, x.name)));
+  const ruleBox = h("div", { class: "row" });
+  const showRule = () => {
+    const v = fRule.value;
+    const field = (label, el) => h("div", {}, h("label", {}, label), el);
+    ruleBox.replaceChildren(...(
+      v === "monthly_weekday" ? [field("몇째 주", fNth), field("요일", fWeekday)] :
+      v === "monthly_day" ? [field("날짜", fDay)] :
+      v === "weekly" ? [field("요일", fWeekday)] :
+      [field("기준일 (한 번 낸 날)", fAnchor)]));
+  };
+  fRule.addEventListener("change", showRule);
+  showRule();
+  const fAdd = h("button", { type: "button" }, "고정 지출 등록");
+  fAdd.onclick = () =>
+    act(fAdd, async () => {
+      const cents = toCents(fAmount.value);
+      if (cents === null || cents <= 0) throw new Error("금액이 올바르지 않습니다.");
+      const rule = fRule.value;
+      await api("POST", "/api/recurring-expenses", {
+        name: fName.value, vendor: fVendor.value || undefined, amount_cents: cents, account: fAccount.value, rule,
+        nth: rule === "monthly_weekday" ? Number(fNth.value) : undefined,
+        weekday: rule === "monthly_weekday" || rule === "weekly" ? Number(fWeekday.value) : undefined,
+        day_of_month: rule === "monthly_day" ? Number(fDay.value) : undefined,
+        anchor_date: rule === "fortnightly" ? fAnchor.value || undefined : undefined,
+        start_date: fStart.value,
+        department_id: fDept.value ? Number(fDept.value) : null, category_id: fCat.value ? Number(fCat.value) : null,
+      });
+      fName.value = fVendor.value = fAmount.value = "";
+      toast("고정 지출을 등록했습니다. 날짜가 다가오면 지출 목록에 '예정'으로 잡힙니다.");
+      await api("GET", "/api/expenses/due"); // put this week's date on the list right away
+      await Promise.all([load(), afterChange()]);
+    });
+
+  const card = h("div", { class: "card" },
+    h("h3", {}, "고정 지출"),
+    h("p", { class: "muted" }, "매달·매주 나가는 비용입니다. 날짜가 7일 안으로 다가오면 지출 목록에 '예정'으로 잡히고, 프로그램을 열 때 알림이 뜹니다."),
+    list,
+    h("details", { class: "mt editor-only" }, h("summary", {}, "새 고정 지출 등록"),
+      h("div", { class: "grid mt" },
+        fName,
+        h("div", { class: "row" }, h("div", {}, h("label", {}, "금액 ($)"), fAmount), h("div", {}, h("label", {}, "계정"), fAccount)),
+        h("div", { class: "row" }, h("div", {}, h("label", {}, "주기"), fRule), h("div", {}, h("label", {}, "시작일"), fStart)),
+        ruleBox,
+        fVendor,
+        h("div", { class: "row" }, fDept, fCat),
+        fAdd)));
+  load().catch((e) => toast(e.message, true));
+  return card;
+}
+
 // ---------- 교적부 ----------
 
 const STATUS_LABELS = {
@@ -921,6 +1163,7 @@ async function renderSettings() {
 
 const TABLE_NAMES = {
   fund_types: "헌금 종류", departments: "부서", expense_categories: "지출 항목",
+  expenses: "지출", recurring_expenses: "고정 지출",
   opening_balances: "시작 잔액", members: "교적부", offerings: "헌금",
   titles: "직분 목록", member_titles: "직분", member_status_events: "출석 상태",
 };
@@ -935,6 +1178,11 @@ function describe(entry) {
   if (entry.action === "void") parts.push(b.amount_cents !== undefined ? money(b.amount_cents) : "", `사유: ${a.void_reason ?? ""}`);
   if (a.is_active !== undefined && b.is_active !== undefined && a.is_active !== b.is_active) parts.push(a.is_active ? "다시 사용" : "사용 중지");
   if (a.offering_date) parts.push(a.offering_date);
+  if (a.vendor && !a.name) parts.push(a.vendor);
+  if (a.total_cents !== undefined) parts.push(money(a.total_cents));
+  if (a.expense_date) parts.push(a.expense_date);
+  if (a.status === "confirmed" && b.status === "planned") parts.push("지급 완료");
+  if (entry.action === "void" && b.total_cents !== undefined) parts.push(money(b.total_cents));
   if (a.title_name) parts.push(`${a.title_name} ${a.start_date ?? ""}~${a.end_date ?? ""}`);
   if (a.status_code) parts.push(`${STATUS_LABELS[a.status_code] ?? a.status_code} ${a.event_date ?? ""}`);
   return parts.filter(Boolean).join(" · ");
@@ -963,7 +1211,7 @@ async function renderAudit() {
 
 // ---------- routing ----------
 
-const routes = { entry: renderEntry, offerings: renderOfferings, registry: renderRegistry, settings: renderSettings, audit: renderAudit };
+const routes = { entry: renderEntry, offerings: renderOfferings, expenses: renderExpenses, registry: renderRegistry, settings: renderSettings, audit: renderAudit };
 const roleText = () => `${state.me.name} · ${isEditor() ? "재정 기록" : "재정 열람"}${isRegistryAdmin() ? " · 교적부 관리" : ""}`;
 
 async function route() {
@@ -991,6 +1239,7 @@ async function start() {
   document.getElementById("who").textContent = roleText();
   window.addEventListener("hashchange", route);
   route();
+  remindDue();
 }
 
 start();
