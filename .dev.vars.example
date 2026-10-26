@@ -1,0 +1,4 @@
+# Copy to .dev.vars for `npm run dev`. Never commit .dev.vars.
+# Local-only login: honoured only when ENVIRONMENT=development AND the request host is localhost.
+ENVIRONMENT=development
+DEV_AUTH_EMAIL=editor1@example.com

@@ -1,0 +1,36 @@
+import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
+import { accessVerifier, authenticate, guardWrites } from "./auth";
+import { lookupRoutes } from "./routes/lookups";
+import { auditRoutes, meRoutes, settingsRoutes, userRoutes } from "./routes/misc";
+import { openingBalanceRoutes } from "./routes/openingBalances";
+import type { AppEnv, TokenVerifier } from "./types";
+
+/** `verify` is injectable so tests can stand in for Cloudflare Access; production uses the default. */
+export function createApp(verify: TokenVerifier = accessVerifier) {
+  const app = new Hono<AppEnv>();
+
+  // Open on purpose: no data, used for uptime checks.
+  app.get("/api/health", (c) => c.json({ ok: true }));
+
+  app.use("/api/*", authenticate(verify));
+  app.use("/api/*", guardWrites);
+
+  app.route("/api/me", meRoutes);
+  app.route("/api/users", userRoutes);
+  app.route("/api/settings", settingsRoutes);
+  app.route("/api/audit-log", auditRoutes);
+  app.route("/api/fund-types", lookupRoutes("fund_types"));
+  app.route("/api/departments", lookupRoutes("departments"));
+  app.route("/api/expense-categories", lookupRoutes("expense_categories"));
+  app.route("/api/opening-balances", openingBalanceRoutes);
+
+  app.notFound((c) => c.json({ error: "찾을 수 없습니다." }, 404));
+  app.onError((err, c) => {
+    if (err instanceof HTTPException) return c.json({ error: err.message }, err.status);
+    console.error(err);
+    return c.json({ error: "서버 오류가 발생했습니다." }, 500);
+  });
+
+  return app;
+}

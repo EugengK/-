@@ -1,0 +1,22 @@
+{
+  "name": "church-accounting",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "church-accounting",
+      // Replace with the id printed by `wrangler d1 create church-accounting`.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    // Anything other than "development" disables the local-login shortcut.
+    "ENVIRONMENT": "production",
+    // Cloudflare Access: "<team>.cloudflareaccess.com" and the application's AUD tag.
+    // While either is empty, every request is rejected (fails closed).
+    "ACCESS_TEAM_DOMAIN": "",
+    "ACCESS_AUD": ""
+  }
+}
