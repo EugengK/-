@@ -5,7 +5,7 @@ import { auditStatement } from "../audit";
 import { todayInHobart } from "../dates";
 import { addDays, describeRule, occurrences, weekdaysInMonth, type Rule } from "../schedule";
 import type { AppEnv, AppUser } from "../types";
-import { isRealDate, isoDate, name, optionalText, parseBody, reason } from "../validation";
+import { isRealDate, isUniqueViolation, isoDate, name, optionalText, parseBody, reason } from "../validation";
 
 const positiveCents = z.number().int("센트 단위 정수여야 합니다.").positive("금액은 0보다 커야 합니다.").max(1_000_000_000);
 const optionalId = z.number().int().positive().nullable().optional();
@@ -148,35 +148,61 @@ recurringRoutes.patch("/:id{[0-9]+}", async (c) => {
     is_active: b.is_active === undefined ? before.is_active : b.is_active ? 1 : 0,
   };
   if (next.end_date && next.end_date < before.start_date) throw new HTTPException(400, { message: "종료일이 시작일보다 빠릅니다." });
+  const unchanged = (Object.keys(next) as (keyof typeof next)[]).every((k) => (before[k as keyof RecurringRow] ?? null) === (next[k] ?? null));
+  if (unchanged) return c.json(recurringOut(before));
+  const today = todayInHobart();
   const restarted = before.is_active === 0 && next.is_active === 1;
   // Restarting doesn't back-fill the paused weeks.
-  const generateFrom = restarted ? todayInHobart() : before.generate_from;
+  const generateFrom = restarted ? today : before.generate_from;
   const user = c.get("user");
   const statements = [
+    // Guarded on the values read, so a concurrent edit to the same rule is not silently lost.
     db
-      .prepare("UPDATE recurring_expenses SET name = ?, vendor = ?, amount_cents = ?, account = ?, end_date = ?, note = ?, is_active = ?, generate_from = ? WHERE id = ?")
-      .bind(next.name, next.vendor, next.amount_cents, next.account, next.end_date, next.note, next.is_active, generateFrom, id),
-    auditStatement(db, user, "update", "recurring_expenses", id, before, { ...next, generate_from: generateFrom }),
+      .prepare(
+        `UPDATE recurring_expenses SET name = ?, vendor = ?, amount_cents = ?, account = ?, end_date = ?, note = ?, is_active = ?, generate_from = ?
+         WHERE id = ? AND name = ? AND vendor IS ? AND amount_cents = ? AND account = ? AND end_date IS ? AND note IS ? AND is_active = ?`,
+      )
+      .bind(next.name, next.vendor, next.amount_cents, next.account, next.end_date, next.note, next.is_active, generateFrom,
+        id, before.name, before.vendor, before.amount_cents, before.account, before.end_date ?? null, before.note, before.is_active),
+    auditStatement(db, user, "update", "recurring_expenses", id, before, { ...next, generate_from: generateFrom }, true),
   ];
-  // Stopped, or ended earlier: unpaid 'planned' rows that no longer apply are cancelled (kept, with a reason).
-  if (next.is_active === 0 || next.end_date) {
+  // Stopped: unpaid planned rows from today on are cancelled (overdue ones stay — that money is still owed).
+  // Ended earlier: planned rows after the end date are cancelled. Each cancellation is audited, and
+  // marked as automatic so restarting / extending can bring the row back.
+  const stopping = before.is_active === 1 && next.is_active === 0;
+  const endMoved = next.end_date !== (before.end_date ?? null);
+  const cutoff = stopping ? addDays(today, -1) : endMoved ? next.end_date : null;
+  if (cutoff) {
+    const reason = stopping ? `${AUTO_VOID}고정 지출 중지` : `${AUTO_VOID}고정 지출 종료일 이후`;
+    const pred = "recurring_id = ? AND status = 'planned' AND scheduled_date > ?";
     statements.push(
       db
         .prepare(
-          `UPDATE expenses SET status = 'void', void_reason = ? WHERE recurring_id = ? AND status = 'planned'
-           AND (? = 0 OR scheduled_date > ?)`,
+          `INSERT INTO audit_log (user_id, user_email, action, table_name, row_id, before_json, after_json)
+           SELECT ?, ?, 'void', 'expenses', id,
+             json_object('status', status, 'expense_date', expense_date, 'total_cents', total_cents, 'vendor', vendor),
+             json_object('status', 'void', 'void_reason', ?)
+           FROM expenses WHERE ${pred}`,
         )
-        .bind(next.is_active === 0 ? "고정 지출 중지로 자동 취소" : "고정 지출 종료일 이후라 자동 취소", id, next.is_active, next.end_date ?? "9999-12-31"),
+        .bind(user.id, user.email, reason, id, cutoff),
+      db.prepare(`UPDATE expenses SET status = 'void', void_reason = ? WHERE ${pred}`).bind(reason, id, cutoff),
     );
   }
-  await db.batch(statements);
+  const [u] = await db.batch(statements);
+  if (u!.meta.changes === 0) throw new HTTPException(409, { message: "다른 사람이 먼저 고쳤습니다. 새로고침 후 다시 시도하세요." });
   return c.json(recurringOut({ ...before, ...next, generate_from: generateFrom }));
 });
 
+/** Prefix of void reasons written automatically (stop / earlier end date); such rows can come back. */
+export const AUTO_VOID = "[자동] ";
+
 /** Days ahead that fixed costs are put on the list (and shown in the reminder). */
 export const LOOKAHEAD_DAYS = 7;
-/** How far back a new or restarted rule fills in missed dates. */
-const LOOKBACK_DAYS = 31;
+/**
+ * How far back missed dates are filled in when nobody opened the app for a while (bounded so one
+ * request stays small). Never earlier than the rule's generate_from (creation / restart date).
+ */
+const LOOKBACK_DAYS = 92;
 
 /**
  * Puts upcoming fixed-cost dates onto the expense list as 'planned'. Idempotent: the unique
@@ -196,16 +222,28 @@ export async function generatePlanned(db: D1Database, today = todayInHobart()): 
   // Dates already on the list (planned, paid or skipped) are left alone. Selecting them first keeps
   // the write batch to the genuinely new dates, so opening the app stays cheap as rules accumulate.
   const { results: existing } = await db
-    .prepare("SELECT recurring_id, scheduled_date FROM expenses WHERE recurring_id IS NOT NULL AND scheduled_date BETWEEN ? AND ?")
+    .prepare("SELECT id, recurring_id, scheduled_date, status, void_reason FROM expenses WHERE recurring_id IS NOT NULL AND scheduled_date BETWEEN ? AND ?")
     .bind(windowFrom, to)
-    .all<{ recurring_id: number; scheduled_date: string }>();
-  const have = new Set(existing.map((e) => `${e.recurring_id}|${e.scheduled_date}`));
+    .all<{ id: number; recurring_id: number; scheduled_date: string; status: string; void_reason: string | null }>();
+  const have = new Map(existing.map((e) => [`${e.recurring_id}|${e.scheduled_date}`, e]));
   const statements: D1PreparedStatement[] = [];
   for (const r of rules) {
     const from = r.generate_from && r.generate_from > windowFrom ? r.generate_from : windowFrom;
     for (const d of occurrences(r, from, to)) {
-      if (have.has(`${r.id}|${d}`)) continue;
+      const prior = have.get(`${r.id}|${d}`);
       const { cents, weeks } = amountFor(r, d);
+      if (prior) {
+        // Cancelled automatically when the rule was stopped / shortened, and the rule now covers
+        // this date again: bring it back. Anything else already there (paid, skipped by a person,
+        // planned) is left alone.
+        if (prior.status === "void" && prior.void_reason?.startsWith(AUTO_VOID)) {
+          statements.push(
+            db.prepare("UPDATE expenses SET status = 'planned', void_reason = NULL, total_cents = ? WHERE id = ? AND status = 'void'").bind(cents, prior.id),
+            auditStatement(db, actor, "update", "expenses", prior.id, { status: "void", void_reason: prior.void_reason }, { status: "planned", total_cents: cents }, true),
+          );
+        }
+        continue;
+      }
       const row = { expense_date: d, vendor: r.vendor || r.name, total_cents: cents, account: r.account, recurring_id: r.id };
       const note = weeks ? `고정 지출: ${r.name} (주 ${(r.amount_cents / 100).toFixed(2)} × ${weeks}주)` : `고정 지출: ${r.name}`;
       // INSERT OR IGNORE: already there (planned, paid or skipped) -> nothing happens, and the
@@ -256,6 +294,7 @@ const expenseCreate = z
     category_id: optionalId,
     paid_by: optionalText(50),
     note: optionalText(300),
+    client_key: z.string().regex(/^[A-Za-z0-9-]{8,64}$/).optional(),
   })
   .strict()
   .refine((v) => (v.gst_cents ?? 0) <= v.total_cents, "GST가 총액보다 클 수 없습니다.");
@@ -275,6 +314,12 @@ expenseRoutes.get("/", async (c) => {
     if (!isRealDate(v)) throw new HTTPException(400, { message: `${key}: YYYY-MM-DD 형식이어야 합니다.` });
     where.push(`e.expense_date ${op} ?`);
     binds.push(v);
+  }
+  const dept = c.req.query("department_id");
+  if (dept) {
+    if (!/^[0-9]{1,15}$/.test(dept)) throw new HTTPException(400, { message: "department_id: 숫자여야 합니다." });
+    where.push("e.department_id = ?");
+    binds.push(Number(dept));
   }
   if (c.req.query("include_void") !== "1") where.push("e.status != 'void'");
   const { results } = await c.env.DB.prepare(
@@ -300,6 +345,10 @@ expenseRoutes.post("/", async (c) => {
   const b = await parseBody(c, expenseCreate);
   const db = c.env.DB;
   const user = c.get("user");
+  const key = b.client_key ?? null;
+  const existingByKey = async () => (key ? db.prepare(`${SELECT} WHERE e.client_key = ?`).bind(key).first() : null);
+  const already = await existingByKey();
+  if (already) return c.json(already, 200); // a resend of a form that was already saved
   const row = {
     expense_date: b.expense_date, vendor: b.vendor, total_cents: b.total_cents, gst_cents: b.gst_cents ?? 0, account: b.account,
     department_id: b.department_id ?? null, category_id: b.category_id ?? null, paid_by: b.paid_by ?? null, note: b.note ?? null,
@@ -308,16 +357,20 @@ expenseRoutes.post("/", async (c) => {
     const [, created] = await db.batch([
       db
         .prepare(
-          `INSERT INTO expenses (expense_date, vendor, total_cents, gst_cents, account, department_id, category_id, paid_by, note, status, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?)`,
+          `INSERT INTO expenses (expense_date, vendor, total_cents, gst_cents, account, department_id, category_id, paid_by, note, status, created_by, client_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, ?)`,
         )
-        .bind(row.expense_date, row.vendor, row.total_cents, row.gst_cents, row.account, row.department_id, row.category_id, row.paid_by, row.note, user.id),
+        .bind(row.expense_date, row.vendor, row.total_cents, row.gst_cents, row.account, row.department_id, row.category_id, row.paid_by, row.note, user.id, key),
       db.prepare(`${SELECT} WHERE e.id = last_insert_rowid()`),
       auditStatement(db, user, "create", "expenses", "last_insert", undefined, row),
     ]);
     return c.json(created!.results[0], 201);
   } catch (err) {
     if (err instanceof Error && /FOREIGN KEY/i.test(err.message)) throw new HTTPException(400, { message: "없는 부서 또는 지출 항목입니다." });
+    if (isUniqueViolation(err)) {
+      const raced = await existingByKey();
+      if (raced) return c.json(raced, 200);
+    }
     throw err;
   }
 });
@@ -330,6 +383,9 @@ expenseRoutes.post("/:id{[0-9]+}/pay", async (c) => {
   const before = await db.prepare(`${SELECT} WHERE e.id = ?`).bind(id).first<ExpenseRow>();
   if (!before) throw new HTTPException(404, { message: "찾을 수 없습니다." });
   if (before.status !== "planned") throw new HTTPException(409, { message: "이미 처리된 항목입니다." });
+  if (b.total_cents !== undefined && b.total_cents < (before.gst_cents as number)) {
+    throw new HTTPException(400, { message: "지급 금액이 이 항목의 GST보다 작습니다. 먼저 '수정'에서 GST를 고치세요." });
+  }
   const next = {
     status: "confirmed",
     total_cents: b.total_cents ?? before.total_cents,
@@ -340,11 +396,14 @@ expenseRoutes.post("/:id{[0-9]+}/pay", async (c) => {
   try {
     const [u] = await db.batch([
       db
-        .prepare("UPDATE expenses SET status = 'confirmed', total_cents = ?, expense_date = ?, account = ?, note = ? WHERE id = ? AND status = 'planned'")
-        .bind(next.total_cents, next.expense_date, next.account, next.note, id),
+        .prepare(
+          `UPDATE expenses SET status = 'confirmed', total_cents = ?, expense_date = ?, account = ?, note = ?
+           WHERE id = ? AND status = 'planned' AND total_cents = ? AND expense_date = ? AND account = ? AND note IS ?`,
+        )
+        .bind(next.total_cents, next.expense_date, next.account, next.note, id, before.total_cents, before.expense_date, before.account, before.note),
       auditStatement(db, c.get("user"), "update", "expenses", id, before, next, true),
     ]);
-    if (u!.meta.changes === 0) throw new HTTPException(409, { message: "이미 처리된 항목입니다." });
+    if (u!.meta.changes === 0) throw new HTTPException(409, { message: "이미 처리되었거나 다른 사람이 고쳤습니다. 새로고침하세요." });
   } catch (err) {
     throw err;
   }
@@ -370,11 +429,14 @@ expenseRoutes.get("/summary", async (c) => {
   const from = c.req.query("from");
   const to = c.req.query("to");
   if (!from || !to || !isRealDate(from) || !isRealDate(to)) throw new HTTPException(400, { message: "from, to: YYYY-MM-DD" });
+  const dept = c.req.query("department_id");
+  if (dept && !/^[0-9]{1,15}$/.test(dept)) throw new HTTPException(400, { message: "department_id: 숫자여야 합니다." });
   const { results } = await c.env.DB.prepare(
     `SELECT status, account, SUM(total_cents) AS total_cents, COUNT(*) AS count FROM expenses
-     WHERE expense_date BETWEEN ? AND ? AND status IN ('confirmed', 'planned') GROUP BY status, account`,
+     WHERE expense_date BETWEEN ? AND ? AND status IN ('confirmed', 'planned') ${dept ? "AND department_id = ?" : ""}
+     GROUP BY status, account`,
   )
-    .bind(from, to)
+    .bind(from, to, ...(dept ? [Number(dept)] : []))
     .all<{ status: string; account: string; total_cents: number; count: number }>();
   const sum = (status: string, account?: string) =>
     results.filter((r) => r.status === status && (!account || r.account === account)).reduce((s, r) => s + r.total_cents, 0);

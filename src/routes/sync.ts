@@ -4,7 +4,7 @@ import { z } from "zod";
 import { auditStatement } from "../audit";
 import { todayInHobart } from "../dates";
 import type { AppEnv, AppUser } from "../types";
-import { isRealDate, isoDate, parseBody } from "../validation";
+import { isRealDate, nameKey, parseBody, pastDate } from "../validation";
 
 /**
  * People from the pastor's 목양 sheet: by the sheet script (token, /api/registry/sync) or by the
@@ -30,7 +30,8 @@ const personSchema = z
     family_code: code.nullable().optional(),
     name: text(50).pipe(z.string().min(1)),
     relation: text(20).nullable().optional(),
-    registered_on: isoDate.nullable().optional(),
+    // Not in the future: the 'registered' event would otherwise outrank every later status change.
+    registered_on: pastDate(todayInHobart).nullable().optional(),
     birth_date: birthDate.nullable().optional(),
     title: text(20).nullable().optional(),
   })
@@ -40,7 +41,7 @@ export const peopleSchema = z.object({ people: z.array(personSchema).min(1).max(
 type Person = z.infer<typeof personSchema>;
 
 /** Sheet spellings that mean one of our titles. */
-const TITLE_ALIASES: Record<string, string> = { 집사: "서리집사", 시무장로: "장로", 시무권사: "권사" };
+const TITLE_ALIASES: Record<string, string> = { 집사: "서리집사", 시무장로: "장로", 시무권사: "권사", 안수집사: "장립집사" };
 
 interface Existing {
   id: number;
@@ -101,18 +102,23 @@ export async function applyPeople(db: D1Database, actor: AppUser, people: Person
   if (new Set(codes).size !== codes.length) throw new HTTPException(400, { message: "같은 교인ID가 두 번 들어 있습니다." });
 
   // Whole tables (church-sized) rather than IN (...): D1 caps bound values per query.
-  const [known, unlinked, titled] = await db.batch([
+  const [known, unlinked, titled, pendingRows] = await db.batch([
     db.prepare("SELECT id, member_code, name, family_code, relation, birth_date FROM members WHERE member_code IS NOT NULL"),
     db.prepare("SELECT id, name, birth_date, relation FROM members WHERE member_code IS NULL"),
     db.prepare("SELECT DISTINCT member_id FROM member_titles"),
+    db.prepare("SELECT member_code FROM sync_pending"),
   ]);
+  const pendingCodes = new Set((pendingRows!.results as { member_code: string }[]).map((r) => r.member_code));
+  /** A row resolved some other way no longer needs the pastor's decision. */
+  const clearPending = (code: string) =>
+    pendingCodes.has(code) ? [db.prepare("DELETE FROM sync_pending WHERE member_code = ?").bind(code)] : [];
   const byCode = new Map((known!.results as unknown as Existing[]).map((k) => [k.member_code, k]));
   const unlinkedRows = unlinked!.results as { id: number; name: string; birth_date: string | null; relation: string | null }[];
-  const unlinkedNames = new Set(unlinkedRows.map((u) => u.name));
+  const unlinkedNames = new Set(unlinkedRows.map((u) => nameKey(u.name)));
   /** A hand-entered/roster person who is certainly this sheet row: same name AND same birth date, only one. */
   const sureMatch = (name: string, birth: string | null) => {
     if (!birth) return null;
-    const hits = unlinkedRows.filter((u) => u.name === name && u.birth_date === birth);
+    const hits = unlinkedRows.filter((u) => nameKey(u.name) === nameKey(name) && u.birth_date === birth);
     return hits.length === 1 ? hits[0]! : null;
   };
   const hasTitle = new Set((titled!.results as { member_id: number }[]).map((t) => t.member_id));
@@ -144,9 +150,12 @@ export async function applyPeople(db: D1Database, actor: AppUser, people: Person
           .prepare("UPDATE members SET member_code = ?, family_code = ?, relation = ? WHERE id = ? AND member_code IS NULL")
           .bind(after.member_code, after.family_code, after.relation, sure.id),
         auditStatement(db, actor, "update", "members", sure.id, sure, after),
+        ...clearPending(p.member_code),
       );
+      unlinkedNames.clear();
+      for (const u of unlinkedRows) unlinkedNames.add(nameKey(u.name));
       if (title && !hasTitle.has(sure.id)) statements.push(...firstTitleStatements(db, actor, p.member_code, title, registeredOn));
-    } else if (!cur && unlinkedNames.has(next.name)) {
+    } else if (!cur && unlinkedNames.has(nameKey(next.name))) {
       // Someone with this name was entered by hand: don't guess, let the pastor link or create.
       result.pending++;
       statements.push(
@@ -173,6 +182,7 @@ export async function applyPeople(db: D1Database, actor: AppUser, people: Person
           )
           .bind(registeredOn, actor.id, p.member_code),
         ...(title ? firstTitleStatements(db, actor, p.member_code, title, registeredOn) : []),
+        ...clearPending(p.member_code),
       );
     } else {
       const changed =
@@ -189,6 +199,7 @@ export async function applyPeople(db: D1Database, actor: AppUser, people: Person
         );
       }
       if (addTitle) statements.push(...firstTitleStatements(db, actor, p.member_code, title, registeredOn));
+      statements.push(...clearPending(p.member_code));
       if (changed || addTitle) result.updated++;
       else result.unchanged++;
     }
@@ -272,32 +283,44 @@ export async function applyRoster(db: D1Database, actor: AppUser, people: Roster
   const today = todayInHobart();
   const result: RosterResult = { created: 0, updated: 0, unchanged: 0, ambiguous: [], unknown_titles: [] };
   const statements: D1PreparedStatement[] = [];
+  const touched = new Set<number>(); // matched earlier in this file
 
   for (const p of people) {
+    if (p.name === "-") continue;
     const birth = p.birth_date ?? null;
     const phone = p.phone || null;
     const { title, unknown } = resolveTitle(p.title);
     if (unknown && !result.unknown_titles.includes(unknown)) result.unknown_titles.push(unknown);
 
-    const sameName = members.filter((m) => m.name === p.name);
-    const exact = birth ? sameName.filter((m) => m.birth_date === birth) : [];
-    const undated = sameName.filter((m) => m.birth_date === null);
+    // Matching is deliberately conservative: merging two different people would attach one
+    // person's giving to another. When in doubt the row is skipped and reported.
+    const key = nameKey(p.name);
+    const sameName = members.filter((m) => nameKey(m.name) === key);
     let match: (typeof members)[number] | null = null;
-    let unsure = false;
+    let why = "";
     if (birth) {
+      const exact = sameName.filter((m) => m.birth_date === birth);
       if (exact.length === 1) match = exact[0]!;
-      else if (exact.length > 1) unsure = true;
-      else if (undated.length === 1 && sameName.length === 1) match = undated[0]!; // fills in the birth date
-      else if (undated.length >= 1) unsure = true;
-      // else: same name, different birth date -> a different person
-    } else if (sameName.length === 1) match = sameName[0]!;
-    else if (sameName.length > 1) unsure = true;
-    if (unsure) {
-      result.ambiguous.push(p.name);
+      else if (exact.length > 1) why = "같은 이름·생년월일이 여럿";
+      else if (sameName.some((m) => m.birth_date === null)) why = "생년월일이 없는 같은 이름이 있음";
+      // else: same name with a different birth date -> a different person (created below)
+    } else if (phone) {
+      const samePhone = sameName.filter((m) => m.phone === phone);
+      if (samePhone.length === 1) match = samePhone[0]!;
+      else if (sameName.length) why = "생년월일이 없어 같은 분인지 알 수 없음";
+    } else if (sameName.length) why = "생년월일·연락처가 없어 같은 분인지 알 수 없음";
+    if (match && (match.id === -1 || touched.has(match.id))) {
+      match = null;
+      why = "파일 안에 같은 분이 두 번";
+    }
+    if (why) {
+      result.ambiguous.push(`${p.name}(${why})`);
       continue;
     }
     if (match) {
-      const next = { birth_date: match.birth_date ?? birth, phone: phone ?? match.phone };
+      touched.add(match.id);
+      // Only fills gaps: an existing phone or birth date is never overwritten by the roster.
+      const next = { birth_date: match.birth_date ?? birth, phone: match.phone ?? phone };
       const changed = next.birth_date !== match.birth_date || next.phone !== match.phone;
       const addTitle = title && !hasTitle.has(match.id);
       if (changed) {

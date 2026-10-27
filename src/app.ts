@@ -15,6 +15,15 @@ import type { AppEnv, TokenVerifier } from "./types";
 export function createApp(verify: TokenVerifier = accessVerifier) {
   const app = new Hono<AppEnv>();
 
+  // API responses are data only: never framed, never sniffed, never cached by shared caches.
+  app.use("/api/*", async (c, next) => {
+    await next();
+    c.header("X-Content-Type-Options", "nosniff");
+    c.header("X-Frame-Options", "DENY");
+    c.header("Referrer-Policy", "no-referrer");
+    c.header("Cache-Control", "no-store");
+  });
+
   // Open on purpose: no data, used for uptime checks.
   app.get("/api/health", (c) => c.json({ ok: true }));
 

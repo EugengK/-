@@ -74,3 +74,6 @@ dialog.ask::backdrop { background: rgba(15, 23, 42, .45); }
 .tag.planned { background: #fff; color: #7c5a00; border: 1px dashed #c9a227; }
 .stat.planned { background: #fff; border: 1px dashed #c9a227; }
 tr.planned-row td { color: #5b6270; font-style: italic; }
+.actions { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; white-space: normal; margin-top: 4px; }
+td.num .tag, td .tag { white-space: nowrap; }
+button.mini { min-height: 36px; padding: 4px 10px; }

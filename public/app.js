@@ -31,7 +31,8 @@ const money = (cents) => moneyFmt.format(cents / 100);
  * Commas are only accepted as thousands separators, so "20,50" is rejected rather than read as 2050.
  */
 function toCents(text, { allowNegative = false } = {}) {
-  const s = String(text).replace(/[\s$]/g, "");
+  // Spaces/$ only around the number; "20 50" is rejected rather than read as 2050.
+  const s = String(text).trim().replace(/^\$\s*/, "").replace(/^-\s*\$\s*/, "-");
   const m = /^(-)?(\d{1,3}(?:,\d{3})+|\d{1,10})(?:\.(\d{1,2}))?$/.exec(s);
   if (!m || (m[1] && !allowNegative)) return null;
   const cents = Number(m[2].replace(/,/g, "")) * 100 + Number((m[3] ?? "").padEnd(2, "0"));
@@ -40,14 +41,23 @@ function toCents(text, { allowNegative = false } = {}) {
 
 const pad = (n) => String(n).padStart(2, "0");
 const ymd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+/** Today in Hobart (the church's calendar), whatever time zone the phone is set to. */
+const hobartToday = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Hobart" }).format(new Date());
+/** Calendar arithmetic on "YYYY-MM-DD" without time zones. */
+const dateAdd = (d, n) => new Date(Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10) + n)).toISOString().slice(0, 10);
 function lastSunday() {
-  const d = new Date();
-  d.setDate(d.getDate() - d.getDay());
-  return ymd(d);
+  const t = hobartToday();
+  return dateAdd(t, -new Date(`${t}T00:00:00Z`).getUTCDay());
 }
 function monthRange() {
-  const d = new Date();
-  return { from: ymd(new Date(d.getFullYear(), d.getMonth(), 1)), to: ymd(new Date(d.getFullYear(), d.getMonth() + 1, 0)) };
+  const t = hobartToday();
+  const last = new Date(Date.UTC(+t.slice(0, 4), +t.slice(5, 7), 0)).getUTCDate();
+  return { from: `${t.slice(0, 8)}01`, to: `${t.slice(0, 8)}${pad(last)}` };
+}
+/** Strict real-date check (rejects 1960-02-30, which Date.parse accepts). */
+function isRealYmd(v) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  return new Date(`${v}T00:00:00Z`).toISOString().slice(0, 10) === v;
 }
 
 let toastTimer;
@@ -72,7 +82,8 @@ async function api(method, path, body) {
   try {
     res = await fetch(path, init);
   } catch (err) {
-    throw new Error(err?.name === "TimeoutError" ? "서버가 응답하지 않습니다. 서버가 켜져 있는지 확인하세요." : "서버에 연결할 수 없습니다. 서버가 켜져 있는지 확인하세요.");
+    const write = method !== "GET" ? " 저장 중이었다면 저장되었을 수도 있으니, 내역에서 먼저 확인한 뒤 다시 시도하세요." : "";
+    throw new Error((err?.name === "TimeoutError" ? "서버가 응답하지 않습니다." : "서버에 연결할 수 없습니다.") + write);
   }
   let data = null;
   try {
@@ -80,7 +91,8 @@ async function api(method, path, body) {
   } catch {
     /* empty body */
   }
-  if (!res.ok) throw new Error(data?.error ?? `오류가 발생했습니다 (${res.status})`);
+  // Server messages may start with a field path ("reason: ", "entries.0.amount_cents: "): not useful here.
+  if (!res.ok) throw new Error((data?.error ?? `오류가 발생했습니다 (${res.status})`).replace(/^[A-Za-z_][\w.]*: /, ""));
   return data;
 }
 
@@ -89,16 +101,21 @@ async function api(method, path, body) {
  * ("prevent this page from creating additional dialogs"), which would make buttons do nothing.
  * Resolves to true/false, or — with `input` — to the typed text / null when cancelled.
  */
-function ask(message, { input, okText = "확인", cancelText = "취소" } = {}) {
+function ask(message, { input, okText = "확인", cancelText = "취소", required = false } = {}) {
   return new Promise((resolve) => {
+    const opener = document.activeElement;
     const dlg = h("dialog", { class: "ask" });
     const field = input !== undefined ? h("input", { value: input ?? "", maxlength: 300, "aria-label": "입력" }) : null;
-    const done = (v) => { dlg.close(); dlg.remove(); resolve(v); };
-    const ok = h("button", { type: "button", onclick: () => done(field ? field.value : true) }, okText);
+    const hint = h("p", { class: "muted", hidden: true }, "내용을 입력하세요.");
+    const done = (v) => { dlg.close(); dlg.remove(); opener?.focus?.(); resolve(v); };
+    const ok = h("button", { type: "button", onclick: () => {
+      if (field && required && !field.value.trim()) { hint.hidden = false; field.focus(); return; }
+      done(field ? field.value : true);
+    } }, okText);
     const cancel = h("button", { type: "button", class: "secondary", onclick: () => done(field ? null : false) }, cancelText);
     dlg.addEventListener("cancel", (e) => { e.preventDefault(); done(field ? null : false); });
     field?.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) ok.click(); });
-    dlg.append(h("p", { class: "ask-msg" }, message), field ?? "", h("div", { class: "row mt" }, cancel, ok));
+    dlg.append(h("p", { class: "ask-msg" }, message), field ?? "", hint, h("div", { class: "row mt" }, cancel, ok));
     document.body.append(dlg);
     dlg.showModal();
     (field ?? ok).focus();
@@ -138,7 +155,9 @@ async function loadFunds() {
   state.funds = await api("GET", "/api/fund-types");
 }
 async function loadMembers() {
-  state.members = await api("GET", "/api/members");
+  const all = await api("GET", "/api/members?include_inactive=1");
+  state.members = all.filter((m) => m.is_active);
+  state.departed = all.filter((m) => !m.is_active);
 }
 /**
  * Unique text for each member in the giver list. When two people share a name, every one of them
@@ -150,7 +169,10 @@ function memberChoices() {
   const raw = state.members.map((m) => ({
     id: m.id,
     name: m.name,
-    label: byName.get(m.name) > 1 ? `${m.name} (${m.current_title || m.relation || `#${m.id}`})` : m.name,
+    // Same name: show what tells them apart (title, birth year, note, relation), id only as a last resort.
+    label: byName.get(m.name) > 1
+      ? `${m.name} (${[m.current_title, m.birth_date ? `${m.birth_date.slice(0, 4)}년생` : null, m.note, m.relation].filter(Boolean).join(", ") || `#${m.id}`})`
+      : m.name,
   }));
   const byLabel = new Map();
   for (const c of raw) byLabel.set(c.label, (byLabel.get(c.label) ?? 0) + 1);
@@ -166,6 +188,9 @@ function resolveGiver(text, choices) {
   const sameName = choices.filter((c) => c.name === t);
   if (sameName.length === 1) return { id: sameName[0].id };
   if (sameName.length > 1) return { error: `'${t}' 이름이 ${sameName.length}명 있습니다. 목록에서 정확히 골라 주세요.` };
+  if ((state.departed ?? []).some((m) => m.name === t)) {
+    return { error: `'${t}'은(는) 교적부에 떠남·이명·별세로 기록된 분입니다. 다시 출석하시면 목사님께 '복귀' 기록을 요청하세요.` };
+  }
   return { error: `'${t}'은(는) 성도 명부에 없습니다. 목록에서 고르거나, 목사님께 교적부 등록을 요청하세요.` };
 }
 
@@ -240,7 +265,10 @@ async function renderEntry(keepDate) {
   const lines = [];
   const date = h("input", { type: "date", value: keepDate || lastSunday(), "aria-label": "날짜" });
   // Same key on every retry of this form, so a resend after a dropped connection is not saved twice.
-  const clientKey = crypto.randomUUID();
+  // Same key for resends of the same form (a resend after a dropped reply is recognised and not saved
+  // twice); a new key as soon as the form differs from what was last sent.
+  let clientKey = crypto.randomUUID();
+  let sentSig = null;
   const list = h("div");
   const totalCash = h("b", {}, money(0));
   const totalOnline = h("b", {}, money(0));
@@ -299,8 +327,16 @@ async function renderEntry(keepDate) {
         if (anonymous.length) lines[anonymous[0]].focusGiver();
         return;
       }
-      await api("POST", "/api/offerings", { offering_date: date.value, entries, client_key: clientKey });
-      toast(`${date.value} 헌금 저장: ${entries.length}건, ${money(total)}`);
+      const sig = JSON.stringify([date.value, entries]);
+      if (sentSig !== null && sentSig !== sig) clientKey = crypto.randomUUID();
+      sentSig = sig;
+      const saved = await api("POST", "/api/offerings", { offering_date: date.value, entries, client_key: clientKey });
+      // Report what the server holds, not what the form says.
+      const savedTotal = saved.reduce((n, o) => n + o.amount_cents, 0);
+      if (saved.length !== entries.length || savedTotal !== total) {
+        await ask(`이 입력은 앞서 저장된 내용으로 이미 처리되어 있었습니다.\n저장된 것: ${saved.length}건, ${money(savedTotal)}\n'헌금 내역'에서 확인하고, 필요하면 바로잡으세요.`, { okText: "확인", cancelText: "닫기" });
+      }
+      toast(`${saved[0]?.offering_date ?? date.value} 헌금 저장: ${saved.length}건, ${money(savedTotal)}`);
       renderEntry(date.value);
     });
 
@@ -403,7 +439,7 @@ async function renderOfferings() {
 }
 
 async function voidOffering(btn, o, after) {
-  const reason = await ask(`${o.offering_date} ${o.fund_type_name} ${money(o.amount_cents)}\n이 항목을 취소합니다. 취소 사유를 입력하세요.\n(잘못 입력했다면 취소 후 다시 입력하세요.)`, { input: "", okText: "취소 처리", cancelText: "닫기" });
+  const reason = await ask(`${o.offering_date} ${o.fund_type_name} ${money(o.amount_cents)}\n이 항목을 취소합니다. 취소 사유를 입력하세요.\n(잘못 입력했다면 취소 후 다시 입력하세요.)`, { input: "", okText: "취소 처리", cancelText: "닫기", required: true });
   if (reason === null) return;
   act(btn, async () => {
     await api("POST", `/api/offerings/${o.id}/void`, { reason });
@@ -418,25 +454,41 @@ const accountTag = (a) => h("span", { class: `tag ${a === "cash" ? "cash" : "onl
 const EXPENSE_STATUS = { planned: "예정", confirmed: "지급", draft: "확인 전", void: "취소됨" };
 const WEEKDAY_NAMES = ["일", "월", "화", "수", "목", "금", "토"];
 
-/** Marks a planned fixed cost as paid, asking for the actual amount (prefilled). */
-async function payPlanned(btn, e, after) {
-  const text = await ask(`${e.expense_date} ${e.recurring_name ?? e.vendor}\n지급 금액을 확인하세요. (바뀌었다면 고쳐서 저장)`, {
-    input: (e.total_cents / 100).toFixed(2), okText: "지급 완료", cancelText: "닫기",
-  });
-  if (text === null) return;
-  await act(btn, async () => {
-    const cents = toCents(text);
-    if (cents === null || cents <= 0) throw new Error("금액이 올바르지 않습니다.");
-    await api("POST", `/api/expenses/${e.id}/pay`, { total_cents: cents });
-    toast(`지급 완료: ${e.recurring_name ?? e.vendor} ${money(cents)}`);
-    await after();
+/** Marks a planned fixed cost as paid: actual amount (prefilled) and the day it was actually paid. */
+function payPlanned(btn, e, after) {
+  return new Promise((resolve) => {
+    const dlg = h("dialog", { class: "ask" });
+    const amount = h("input", { inputmode: "decimal", value: (e.total_cents / 100).toFixed(2), "aria-label": "지급 금액" });
+    const date = h("input", { type: "date", value: hobartToday(), max: hobartToday(), "aria-label": "지급한 날" });
+    const close = () => { dlg.close(); dlg.remove(); resolve(); };
+    dlg.addEventListener("cancel", (ev) => { ev.preventDefault(); close(); });
+    const ok = h("button", { type: "button" }, "지급 완료");
+    ok.onclick = () =>
+      act(ok, async () => {
+        const cents = toCents(amount.value);
+        if (cents === null || cents <= 0) throw new Error("금액이 올바르지 않습니다.");
+        if (!isRealYmd(date.value)) throw new Error("지급한 날을 고르세요.");
+        await api("POST", `/api/expenses/${e.id}/pay`, { total_cents: cents, expense_date: date.value });
+        toast(`지급 완료: ${e.recurring_name ?? e.vendor} ${money(cents)}`);
+        close();
+        await after();
+      });
+    const form = h("form", { method: "dialog", onsubmit: (ev) => { ev.preventDefault(); ok.click(); } },
+      h("h3", {}, e.recurring_name ?? e.vendor),
+      h("p", { class: "muted" }, `예정일 ${e.expense_date}${e.note ? ` · ${e.note}` : ""}`),
+      h("div", { class: "row" }, h("div", {}, h("label", {}, "지급 금액 ($)"), amount), h("div", {}, h("label", {}, "지급한 날"), date)),
+      h("div", { class: "row mt" }, h("button", { type: "button", class: "secondary", onclick: close }, "닫기"), ok));
+    dlg.append(form);
+    document.body.append(dlg);
+    dlg.showModal();
+    amount.focus();
   });
 }
 
 async function voidExpense(btn, e, after) {
   const planned = e.status === "planned";
   const reason = await ask(`${e.expense_date} ${e.recurring_name ?? e.vendor} ${money(e.total_cents)}\n${planned ? "이번 회차를 건너뜁니다." : "이 지출을 취소합니다."} 사유를 입력하세요.`, {
-    input: "", okText: planned ? "건너뛰기" : "취소 처리", cancelText: "닫기",
+    input: "", okText: planned ? "건너뛰기" : "취소 처리", cancelText: "닫기", required: true,
   });
   if (reason === null) return;
   await act(btn, async () => {
@@ -525,9 +577,9 @@ async function expenseListView(depts, cats) {
     const mine = ++seq;
     if (from.value > to.value) { out.replaceChildren(h("p", { class: "notice" }, "시작일이 종료일보다 늦습니다.")); return; }
     const q = new URLSearchParams({ from: from.value, to: to.value });
-    const [sum, all] = await Promise.all([api("GET", `/api/expenses/summary?${q}`), api("GET", `/api/expenses?${q}`)]);
+    if (deptSel.value) q.set("department_id", deptSel.value); // filters the totals as well as the list
+    const [sum, rows] = await Promise.all([api("GET", `/api/expenses/summary?${q}`), api("GET", `/api/expenses?${q}`)]);
     if (mine !== seq) return;
-    const rows = deptSel.value ? all.filter((e) => String(e.department_id) === deptSel.value) : all;
     out.replaceChildren(
       h("div", { class: "card" },
         h("div", { class: "totals" },
@@ -545,7 +597,7 @@ async function expenseListView(depts, cats) {
                   [e.department_name, e.category_name].some(Boolean) ? h("div", { class: "muted" }, [e.department_name, e.category_name].filter(Boolean).join(" · ")) : null,
                   e.note ? h("div", { class: "muted" }, e.note) : null),
                 h("td", { class: "num" }, money(e.total_cents),
-                  h("div", { class: "editor-only" },
+                  h("div", { class: "editor-only actions" },
                     e.status === "planned" ? h("button", { type: "button", class: "small", onclick: (ev) => payPlanned(ev.currentTarget, e, load) }, "지급") : null,
                     h("button", { type: "button", class: "mini", onclick: (ev) => editExpense(ev.currentTarget, e, depts, cats, load) }, "수정"),
                     h("button", { type: "button", class: "mini danger-text", onclick: (ev) => voidExpense(ev.currentTarget, e, load) }, e.status === "planned" ? "건너뛰기" : "취소")))))))
@@ -580,6 +632,7 @@ async function editExpense(btn, e, depts, cats, after) {
   const note = h("input", { value: e.note ?? "", maxlength: 300, "aria-label": "메모" });
   const close = () => { dlg.close(); dlg.remove(); };
   dlg.addEventListener("cancel", (ev) => { ev.preventDefault(); close(); });
+  dlg.addEventListener("keydown", (ev) => { if (ev.key === "Enter" && !ev.isComposing && ev.target.tagName === "INPUT") save.click(); });
   const save = h("button", { type: "button" }, "저장");
   save.onclick = () =>
     act(save, async () => {
@@ -617,23 +670,32 @@ async function editExpense(btn, e, depts, cats, after) {
 /** 지출 입력: a one-off expense. */
 function expenseEntryCard(depts, cats) {
   const optSel = (label, rows) => h("select", { "aria-label": label }, h("option", { value: "" }, `${label} (선택)`), rows.map((x) => h("option", { value: x.id }, x.name)));
-  const eDate = h("input", { type: "date", value: ymd(new Date()), "aria-label": "날짜" });
+  const eDate = h("input", { type: "date", value: hobartToday(), "aria-label": "날짜" });
   const eVendor = h("input", { placeholder: "지급처 / 내용 (예: Coles, 간식)", maxlength: 100, "aria-label": "지급처 / 내용" });
   const eAmount = h("input", { inputmode: "decimal", placeholder: "0.00", "aria-label": "금액" });
   const eAccount = h("select", { "aria-label": "계정" }, h("option", { value: "cash" }, "현금"), h("option", { value: "bank" }, "은행"));
   const eDept = optSel("부서", depts), eCat = optSel("지출 항목", cats);
   const eNote = h("input", { placeholder: "메모 (선택)", maxlength: 300 });
   const eSave = h("button", { type: "button" }, "지출 저장");
+  let clientKey = crypto.randomUUID();
+  let sentSig = null;
   eSave.onclick = () =>
     act(eSave, async () => {
       const cents = toCents(eAmount.value);
       if (cents === null || cents <= 0) throw new Error("금액이 올바르지 않습니다. (예: 45.50)");
       if (!eVendor.value.trim()) throw new Error("지급처 / 내용을 입력하세요.");
       if (!(await ask(`${eDate.value} ${eVendor.value.trim()} ${money(cents)} 지출을 저장할까요?`, { okText: "저장" }))) return;
-      await api("POST", "/api/expenses", {
+      const body = {
         expense_date: eDate.value, vendor: eVendor.value, total_cents: cents, account: eAccount.value,
         department_id: eDept.value ? Number(eDept.value) : null, category_id: eCat.value ? Number(eCat.value) : null, note: eNote.value || undefined,
-      });
+      };
+      // A resend of the same form (after a dropped reply) is not saved twice; a changed form gets a new key.
+      const sig = JSON.stringify(body);
+      if (sentSig !== null && sentSig !== sig) clientKey = crypto.randomUUID();
+      sentSig = sig;
+      await api("POST", "/api/expenses", { ...body, client_key: clientKey });
+      clientKey = crypto.randomUUID();
+      sentSig = null;
       eVendor.value = eAmount.value = eNote.value = "";
       toast("지출을 저장했습니다. '지출 내역'에서 볼 수 있습니다.");
     });
@@ -667,8 +729,11 @@ function recurringCard(depts, cats, afterChange) {
                   await load();
                 });
               } }, "금액"),
-              h("button", { type: "button", class: "mini danger-text", onclick: (ev) =>
-                act(ev.currentTarget, async () => { await api("PATCH", `/api/recurring-expenses/${r.id}`, { is_active: !r.is_active }); await load(); await afterChange(); }) },
+              h("button", { type: "button", class: "mini danger-text", onclick: async (ev) => {
+                const btn = ev.currentTarget;
+                if (r.is_active && !(await ask(`'${r.name}'을(를) 중지할까요?\n오늘 이후로 잡혀 있던 '예정' 항목은 취소됩니다. 이미 날짜가 지난 미지급 항목은 그대로 남습니다.\n(다시 사용하면 취소된 예정 항목이 되살아납니다.)`, { okText: "중지" }))) return;
+                act(btn, async () => { await api("PATCH", `/api/recurring-expenses/${r.id}`, { is_active: !r.is_active }); await load(); await afterChange(); });
+              } },
                 r.is_active ? "중지" : "다시 사용"))))
       : [h("p", { class: "muted" }, "등록된 고정 지출이 없습니다.")]));
   };
@@ -690,7 +755,7 @@ function recurringCard(depts, cats, afterChange) {
   const fWeekday = h("select", { "aria-label": "요일" }, WEEKDAY_NAMES.map((t, i) => h("option", { value: i }, `${t}요일`)));
   const fDay = h("select", { "aria-label": "날짜" }, Array.from({ length: 31 }, (_, i) => h("option", { value: i + 1 }, i === 30 ? "말일" : `${i + 1}일`)));
   const fAnchor = h("input", { type: "date", "aria-label": "기준일 (한 번 낸 날)" });
-  const fStart = h("input", { type: "date", value: ymd(new Date()), "aria-label": "시작일" });
+  const fStart = h("input", { type: "date", value: hobartToday(), "aria-label": "시작일" });
   const fDept = h("select", { "aria-label": "부서" }, h("option", { value: "" }, "부서 (선택)"), depts.map((x) => h("option", { value: x.id }, x.name)));
   const fCat = h("select", { "aria-label": "지출 항목" }, h("option", { value: "" }, "지출 항목 (선택)"), cats.map((x) => h("option", { value: x.id }, x.name)));
   const ruleBox = h("div", { class: "row" });
@@ -843,14 +908,14 @@ async function renderRegistry() {
             h("p", { class: "muted" }, "이미 직접 등록된 같은 이름의 분이 있습니다. 같은 분이면 '같은 분'을, 다른 분이면 '새로 등록'을 누르세요. 같은 분으로 연결하면 지난 헌금 기록이 그대로 이어집니다."),
             h("ul", { class: "list" }, rows.map((p) =>
               h("li", { style: "flex-wrap:wrap" },
-                h("div", { class: "grow" }, h("b", {}, p.name), " ", h("span", { class: "muted" }, [p.relation, p.member_code].filter(Boolean).join(" · "))),
+                h("div", { class: "grow" }, h("b", {}, p.name), " ", h("span", { class: "muted" }, [p.relation, p.birth_date ? `${p.birth_date}생` : "생년월일 없음", p.member_code].filter(Boolean).join(" · "))),
                 h("div", { class: "row shrink" },
                   ...p.candidates.map((cand) =>
                     h("button", { type: "button", class: "secondary small", onclick: async (e) => {
                       const btn = e.currentTarget;
                       if (!(await ask(`시트의 '${p.name}'(${p.member_code})을(를) 이미 등록된 '${cand.name}'${cand.note ? `(${cand.note})` : ""}과(와) 같은 분으로 연결할까요?`))) return;
                       act(btn, async () => { await api("POST", `/api/registry/pending/${p.member_code}/link`, { member_id: cand.id }); toast("연결했습니다."); await Promise.all([load(), loadPending()]); });
-                    } }, `같은 분${p.candidates.length > 1 ? ` (#${cand.id}${cand.note ? ` ${cand.note}` : ""})` : ""}`)),
+                    } }, `같은 분: ${cand.name} (${[cand.birth_date ? `${cand.birth_date}생` : "생년월일 없음", cand.relation, cand.note].filter(Boolean).join(", ")})`)),
                   h("button", { type: "button", class: "small", onclick: async (e) => {
                     const btn = e.currentTarget;
                     if (!(await ask(`'${p.name}'을(를) 다른 분으로 새로 등록할까요?`))) return;
@@ -882,14 +947,15 @@ async function renderRegistryMember(ticket, id) {
   const voidBtn = (path, what) =>
     h("button", { type: "button", class: "danger small registry-only", onclick: async (e) => {
       const btn = e.currentTarget;
-      const reason = await ask(`${what}\n이 기록을 취소합니다. 사유를 입력하세요.`, { input: "", okText: "취소 처리", cancelText: "닫기" });
+      const reason = await ask(`${what}\n이 기록을 취소합니다. 사유를 입력하세요.`, { input: "", okText: "취소 처리", cancelText: "닫기", required: true });
       if (reason === null) return;
       act(btn, async () => { await api("POST", path, { reason }); toast("취소했습니다."); reload(); });
     } }, "취소");
 
   // 직분 추가
-  const titleSel = h("select", { "aria-label": "직분" }, titles.filter((t) => t.is_active).map((t) => h("option", { value: t.id }, t.term_limited ? `${t.name} (1년 임기)` : t.name)));
-  const tStart = h("input", { type: "date", value: `${thisYear()}-01-01`, "aria-label": "시작일" });
+  const titleSel = h("select", { "aria-label": "직분" }, h("option", { value: "" }, "직분 선택"),
+    titles.filter((t) => t.is_active).map((t) => h("option", { value: t.id }, t.term_limited ? `${t.name} (1년 임기)` : t.name)));
+  const tStart = h("input", { type: "date", value: hobartToday(), "aria-label": "시작일" });
   const tEnd = h("input", { type: "date", "aria-label": "종료일" });
   const tNote = h("input", { placeholder: "메모 (선택)", maxlength: 300 });
   const syncEnd = () => {
@@ -902,6 +968,9 @@ async function renderRegistryMember(ticket, id) {
   const tAdd = h("button", { type: "button" }, "직분 추가");
   tAdd.onclick = () =>
     act(tAdd, async () => {
+      const t = titles.find((x) => String(x.id) === titleSel.value);
+      if (!t) throw new Error("직분을 고르세요.");
+      if (!(await ask(`${m.name}: ${t.name}\n${tStart.value} ~ ${tEnd.value || "(계속)"}\n이렇게 기록할까요?`, { okText: "기록" }))) return;
       await api("POST", `/api/registry/members/${id}/titles`, {
         title_id: Number(titleSel.value), start_date: tStart.value, end_date: tEnd.value || null, note: tNote.value || undefined,
       });
@@ -910,12 +979,17 @@ async function renderRegistryMember(ticket, id) {
     });
 
   // 상태 추가
-  const sSel = h("select", { "aria-label": "상태" }, Object.entries(STATUS_LABELS).filter(([k]) => k !== "registered").map(([k, v]) => h("option", { value: k }, v)));
-  const sDate = h("input", { type: "date", value: ymd(new Date()), max: ymd(new Date()), "aria-label": "날짜" });
+  const sSel = h("select", { "aria-label": "상태" }, h("option", { value: "" }, "상태 선택"),
+    Object.entries(STATUS_LABELS).filter(([k]) => k !== "registered").map(([k, v]) => h("option", { value: k }, v)));
+  const sDate = h("input", { type: "date", value: hobartToday(), max: hobartToday(), "aria-label": "날짜" });
   const sNote = h("input", { placeholder: "메모 (선택)", maxlength: 300 });
   const sAdd = h("button", { type: "button" }, "상태 기록");
   sAdd.onclick = () =>
     act(sAdd, async () => {
+      if (!sSel.value) throw new Error("상태를 고르세요.");
+      const label = STATUS_LABELS[sSel.value];
+      const warn = LEFT_CODES.has(sSel.value) ? "\n이렇게 기록하면 헌금 입력의 이름 목록에서 빠집니다. (지난 기록은 그대로 남습니다.)" : "";
+      if (!(await ask(`${m.name}: ${sDate.value} ${label}${warn}\n기록할까요?`, { okText: "기록" }))) return;
       await api("POST", `/api/registry/members/${id}/status`, { status_code: sSel.value, event_date: sDate.value, note: sNote.value || undefined });
       toast("상태를 기록했습니다.");
       reload();
@@ -928,7 +1002,20 @@ async function renderRegistryMember(ticket, id) {
     h("div", { class: "card" },
       h("ul", { class: "list" },
         h("li", {}, h("span", {}, "관계"), h("b", {}, m.relation ?? "-")),
-        h("li", {}, h("span", {}, "생년월일"), h("b", {}, m.birth_date ? `${m.birth_date} (${ageOf(m.birth_date)}세)` : "-")),
+        h("li", {}, h("span", {}, "생년월일"),
+          h("span", {}, h("b", {}, m.birth_date ? `${m.birth_date} (${ageOf(m.birth_date)}세)` : "-"), " ",
+            h("button", { type: "button", class: "mini registry-only", onclick: async (ev) => {
+              const btn = ev.currentTarget;
+              const v = await ask(`${m.name}의 생년월일 (YYYY-MM-DD)\n같은 이름의 분을 구분하고, 시트 연동 때 같은 분을 찾는 데 쓰입니다.`, { input: m.birth_date ?? "", okText: "저장" });
+              if (v === null) return;
+              act(btn, async () => {
+                const val = v.trim();
+                if (val && !isRealYmd(val)) throw new Error("YYYY-MM-DD 형식의 실제 날짜를 넣으세요. (예: 1960-05-01)");
+                await api("PATCH", `/api/members/${id}`, { birth_date: val || null, expected: { birth_date: m.birth_date } });
+                toast("생년월일을 저장했습니다.");
+                reload();
+              });
+            } }, "수정"))),
         h("li", {}, h("span", {}, "교인ID"), h("b", {}, m.member_code ?? "직접 등록")),
         h("li", {}, h("span", {}, "등록일"), h("b", {}, m.registered_on ?? "-")),
         m.family.length
@@ -980,7 +1067,7 @@ async function renderRegistryMember(ticket, id) {
 function parseCsv(text) {
   const rows = [];
   let row = [], field = "", i = 0, quoted = false;
-  text = text.replace(/^\uFEFF/, "");
+  text = text.replace(/^\uFEFF/, "").replace(/\r(?!\n)/g, "\n"); // old Mac CR-only line endings
   while (i < text.length) {
     const ch = text[i];
     if (quoted) {
@@ -1030,7 +1117,7 @@ function peopleFromCsv(text) {
       !name || name.length > 50 ? "이름" : relation.length > 20 ? "관계" : title.length > 20 ? "직분" : "";
     if (problem) { skipped.push(`${i + 2}행(${problem})`); return; }
     let birth = csvDate(get(r, "birth_date"));
-    if (birth && (birth < "1900-01-01" || birth > today || isNaN(Date.parse(birth)))) birth = null;
+    if (birth && (birth < "1900-01-01" || birth > today || !isRealYmd(birth))) birth = null;
     if (!birth && get(r, "birth_date")) noBirth.push(`${i + 2}행`);
     const reg = csvDate(get(r, "first_registered")) || csvDate(get(r, "registered_at"));
     people.push({
@@ -1055,13 +1142,13 @@ function peopleFromRoster(rows) {
   const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Hobart" }).format(new Date());
   const people = [], skipped = [], noBirth = [];
   rows.slice(1).forEach((r, i) => {
-    const name = get(r, c.name);
+    const name = blank(get(r, c.name));
     if (!name) return;
     if (name.length > 50) { skipped.push(`${i + 2}행(성명)`); return; }
     const kind = blank(get(r, c.kind)), sub = blank(get(r, c.title));
     const school = kind === "주일학교";
     let birth = csvDate(blank(get(r, c.birth)));
-    if (birth && (birth < "1900-01-01" || birth > today || isNaN(Date.parse(birth)))) birth = null;
+    if (birth && (birth < "1900-01-01" || birth > today || !isRealYmd(birth))) birth = null;
     if (!birth && blank(get(r, c.birth))) noBirth.push(`${i + 2}행`);
     const title = school ? "" : sub || kind;
     people.push({
@@ -1106,7 +1193,13 @@ function importCard(after) {
       out.textContent = `${people.length}명을 보내는 중…`;
       const total = { created: 0, updated: 0, pending: 0, unchanged: 0, unknown: new Set(), ambiguous: [] };
       for (let i = 0; i < people.length; i += 100) {
-        const r = await api("POST", isRoster ? "/api/registry/import-roster" : "/api/registry/import", { people: people.slice(i, i + 100) });
+        let r;
+        try {
+          r = await api("POST", isRoster ? "/api/registry/import-roster" : "/api/registry/import", { people: people.slice(i, i + 100) });
+        } catch (err) {
+          throw new Error(`${i + 1}~${Math.min(i + 100, people.length)}번째 사람을 보내다 멈췄습니다 (${err.message}). ` +
+            (i ? `그 앞의 ${i}명은 이미 들어갔습니다. 파일을 고친 뒤 다시 가져오면 중복 없이 이어집니다.` : "아무것도 들어가지 않았습니다."));
+        }
         total.created += r.created; total.updated += r.updated; total.pending += r.pending ?? 0; total.unchanged += r.unchanged;
         r.unknown_titles.forEach((t) => total.unknown.add(t));
         total.ambiguous.push(...(r.ambiguous ?? []));
@@ -1116,7 +1209,7 @@ function importCard(after) {
         skipped.length ? h("div", {}, `형식이 맞지 않아 건너뛴 줄: ${skipped.join(", ")}`) : null,
         noBirth.length ? h("div", {}, `생년월일을 읽지 못한 줄 (나머지는 가져옴): ${noBirth.join(", ")}`) : null,
         total.unknown.size ? h("div", {}, `목록에 없는 직분이라 기록하지 않음: ${[...total.unknown].join(", ")}`) : null,
-        total.ambiguous.length ? h("div", {}, `같은 이름이 여럿이라 누구인지 알 수 없어 건너뜀: ${total.ambiguous.join(", ")}`) : null,
+        total.ambiguous.length ? h("div", {}, `같은 분인지 확실하지 않아 건너뜀 (교인 상세에서 생년월일을 넣은 뒤 다시 가져오세요): ${total.ambiguous.join(", ")}`) : null,
       ].filter(Boolean));
       file.value = "";
       toast("가져왔습니다.");
@@ -1195,12 +1288,12 @@ function openingBalanceCard() {
               h("div", {}, h("b", { style: "font-size:18px" }, money(cur.amount_cents)), cur.note ? h("div", { class: "muted" }, cur.note) : null),
               h("div", { class: "shrink editor-only" }, h("button", { type: "button", class: "danger small", onclick: async (e) => {
                 const btn = e.currentTarget;
-                const reason = await ask(`${label} 시작 잔액 ${money(cur.amount_cents)}을 취소합니다. 사유를 입력하세요.`, { input: "", okText: "취소 처리", cancelText: "닫기" });
+                const reason = await ask(`${label} 시작 잔액 ${money(cur.amount_cents)}을 취소합니다. 사유를 입력하세요.`, { input: "", okText: "취소 처리", cancelText: "닫기", required: true });
                 if (reason === null) return;
                 act(btn, async () => { await api("POST", `/api/opening-balances/${cur.id}/void`, { reason }); await load(); });
               } }, "취소"))));
         }
-        const date = h("input", { type: "date", value: ymd(new Date()) });
+        const date = h("input", { type: "date", value: hobartToday() });
         const amount = h("input", { inputmode: "decimal", placeholder: "0.00" });
         const note = h("input", { placeholder: "메모 (선택)", maxlength: 300 });
         const save = h("button", { type: "button" }, "저장");
@@ -1311,10 +1404,12 @@ async function route() {
   const tab = currentTab();
   for (const a of document.querySelectorAll(".tabs a")) a.classList.toggle("on", a.dataset.tab === tab);
   view.replaceChildren(h("p", { class: "muted" }, "불러오는 중…"));
+  const ticketBefore = renderTicket;
   try {
     await routes[tab]();
   } catch (err) {
-    view.replaceChildren(h("p", { class: "notice" }, err.message));
+    // Only if no newer screen has started since (the user may have moved on).
+    if (renderTicket === ticketBefore + 1) view.replaceChildren(h("p", { class: "notice" }, err.message));
   }
 }
 
@@ -1326,6 +1421,7 @@ async function start() {
     return;
   }
   document.body.classList.toggle("viewer", !isEditor());
+  document.querySelector('.tabs a[data-tab="entry"]').hidden = !isEditor(); // nothing to do there for a viewer
   document.body.classList.toggle("no-registry", !isRegistryAdmin());
   document.getElementById("church-name").textContent = state.settings.church_name || "교회 회계";
   document.title = `${state.settings.church_name || "교회"} 회계`;

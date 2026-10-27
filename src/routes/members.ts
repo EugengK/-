@@ -5,7 +5,7 @@ import { auditStatement } from "../audit";
 import { todayInHobart } from "../dates";
 import { CURRENT_STATUS, CURRENT_TITLE } from "../registrySql";
 import type { AppEnv } from "../types";
-import { name, optionalText, parseBody } from "../validation";
+import { name, optionalText, parseBody, pastDate } from "../validation";
 
 interface MemberRow {
   id: number;
@@ -14,16 +14,18 @@ interface MemberRow {
   email: string | null;
   note: string | null;
   relation: string | null;
+  birth_date: string | null;
   is_active: number;
 }
 
-const COLUMNS = "id, name, phone, email, note, relation, is_active";
+const COLUMNS = "id, name, phone, email, note, relation, birth_date, is_active";
 
 const fields = {
   phone: optionalText(30),
   email: optionalText(100),
   note: optionalText(300),
   relation: optionalText(20),
+  birth_date: pastDate(todayInHobart).nullable().optional(),
 };
 
 const createSchema = z.object({ name, ...fields }).strict();
@@ -44,6 +46,7 @@ const updateSchema = z
         email: z.string().nullable(),
         note: z.string().nullable(),
         relation: z.string().nullable(),
+        birth_date: z.string().nullable(),
       })
       .partial()
       .strict()
@@ -86,14 +89,15 @@ memberRoutes.post("/", async (c) => {
     email: body.email ?? null,
     note: body.note ?? null,
     relation: body.relation ?? null,
+    birth_date: body.birth_date ?? null,
   };
   const today = todayInHobart();
   const db = c.env.DB;
   // The SELECT must come before the audit INSERT, which moves last_insert_rowid() on.
   const [, created] = await db.batch([
     db
-      .prepare("INSERT INTO members (name, phone, email, note, relation, registered_on) VALUES (?, ?, ?, ?, ?, ?)")
-      .bind(row.name, row.phone, row.email, row.note, row.relation, today),
+      .prepare("INSERT INTO members (name, phone, email, note, relation, birth_date, registered_on) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .bind(row.name, row.phone, row.email, row.note, row.relation, row.birth_date, today),
     db.prepare(`SELECT ${COLUMNS} FROM members WHERE id = last_insert_rowid()`),
     auditStatement(db, user, "create", "members", "last_insert", undefined, row),
     db
@@ -116,22 +120,23 @@ memberRoutes.patch("/:id{[0-9]+}", async (c) => {
     if (before[k as keyof MemberRow] !== v) throw new HTTPException(409, { message: STALE });
   }
 
-  const pick = <K extends "phone" | "email" | "note" | "relation">(k: K) => (body[k] === undefined ? before[k] : body[k]);
+  const pick = <K extends "phone" | "email" | "note" | "relation" | "birth_date">(k: K) => (body[k] === undefined ? before[k] : body[k]);
   const next = {
     name: body.name ?? before.name,
     phone: pick("phone"),
     email: pick("email"),
     note: pick("note"),
     relation: pick("relation"),
+    birth_date: pick("birth_date"),
   };
   // Guarded on the values read above, so an edit landing in between is not overwritten either.
   const [updated] = await c.env.DB.batch([
     c.env.DB.prepare(
-      `UPDATE members SET name = ?, phone = ?, email = ?, note = ?, relation = ?
-       WHERE id = ? AND name IS ? AND phone IS ? AND email IS ? AND note IS ? AND relation IS ?`,
+      `UPDATE members SET name = ?, phone = ?, email = ?, note = ?, relation = ?, birth_date = ?
+       WHERE id = ? AND name IS ? AND phone IS ? AND email IS ? AND note IS ? AND relation IS ? AND birth_date IS ?`,
     ).bind(
-      next.name, next.phone, next.email, next.note, next.relation,
-      id, before.name, before.phone, before.email, before.note, before.relation,
+      next.name, next.phone, next.email, next.note, next.relation, next.birth_date,
+      id, before.name, before.phone, before.email, before.note, before.relation, before.birth_date,
     ),
     auditStatement(c.env.DB, c.get("user"), "update", "members", id, before, { id, ...next }, true),
   ]);

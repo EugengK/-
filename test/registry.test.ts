@@ -355,7 +355,8 @@ describe("church roster import (no IDs) and auto-linking", () => {
     expect((await byName("다집사"))[0].current_title).toBe("서리집사");
     expect((await byName("라전도사"))[0].current_title).toBe("전도사");
     expect((await byName("마어린이"))[0].note).toBe("주일학교 Year 7");
-    expect(await json(await roster(people))).toMatchObject({ created: 0, updated: 0, unchanged: 6 });
+    // Re-import: everyone matched except the person with neither birth date nor phone, who is reported, never guessed.
+    expect(await json(await roster(people))).toMatchObject({ created: 0, updated: 0, unchanged: 5, ambiguous: ["라전도사(생년월일·연락처가 없어 같은 분인지 알 수 없음)"] });
     expect(await count("SELECT COUNT(*) AS n FROM members")).toBe(6);
   });
 
@@ -369,14 +370,49 @@ describe("church roster import (no IDs) and auto-linking", () => {
     await roster([{ name: "김철수", birth_date: "1970-01-01" }]); // different person
     expect(await byName("김철수")).toHaveLength(2);
     const r = await json(await roster([{ name: "김철수" }])); // no birth date: can't tell which
-    expect(r.ambiguous).toEqual(["김철수"]);
+    expect(r.ambiguous).toEqual(["김철수(생년월일·연락처가 없어 같은 분인지 알 수 없음)"]);
     expect(await byName("김철수")).toHaveLength(2);
   });
 
-  it("fills a missing birth date and phone on the one same-name person", async () => {
-    await roster([{ name: "박", title: "성도" }]);
-    expect(await json(await roster([{ name: "박", birth_date: "1980-01-01", phone: "0411" }]))).toMatchObject({ updated: 1 });
-    expect((await byName("박"))[0]).toMatchObject({ birth_date: "1980-01-01", phone: "0411" });
+  it("never merges into a same-name person without a birth date (could be a different person)", async () => {
+    const visitor = await newMember("최지훈"); // hand-entered visitor, maybe with giving
+    await call("PATCH", `/api/members/${visitor.id}`, { as: PASTOR, body: { phone: "visitor-phone" } });
+    const r = await json(await roster([{ name: "최지훈", birth_date: "2015-03-03", title: "성도" }]));
+    expect(r.ambiguous).toEqual(["최지훈(생년월일이 없는 같은 이름이 있음)"]);
+    const [v] = await byName("최지훈");
+    expect(v).toMatchObject({ phone: "visitor-phone", birth_date: null });
+    // Once the pastor records the visitor's real birth date, the roster child is a different person.
+    await call("PATCH", `/api/members/${visitor.id}`, { as: PASTOR, body: { birth_date: "1980-01-01" } });
+    expect(await json(await roster([{ name: "최지훈", birth_date: "2015-03-03" }]))).toMatchObject({ created: 1 });
+  });
+
+  it("without a birth date, matches only on the same phone; never overwrites a known phone", async () => {
+    await roster([{ name: "전도사", phone: "0425" }]);
+    expect(await json(await roster([{ name: "전도사", phone: "0425", title: "전도사" }]))).toMatchObject({ updated: 1, ambiguous: [] });
+    expect(await json(await roster([{ name: "전도사", phone: "0999" }]))).toMatchObject({ ambiguous: ["전도사(생년월일이 없어 같은 분인지 알 수 없음)"] });
+    expect((await byName("전도사"))[0].phone).toBe("0425");
+  });
+
+  it("same person twice in one file is reported, not merged or crashed; two same-name people with different birth dates are both created", async () => {
+    const r = await json(await roster([
+      { name: "김민수", birth_date: "1990-01-01" },
+      { name: "김민수", birth_date: "1990-01-01", title: "청년" },
+      { name: "박철수", birth_date: "1950-01-01", title: "장로" },
+      { name: "박철수", birth_date: "1985-01-01" },
+    ]));
+    expect(r.created).toBe(3);
+    expect(r.ambiguous).toEqual(["김민수(파일 안에 같은 분이 두 번)"]);
+    expect(await byName("박철수")).toHaveLength(2);
+  });
+
+  it("spacing differences are the same name", async () => {
+    await roster([{ name: "김 영수", birth_date: "1970-01-01" }]);
+    expect(await json(await sync({ people: [person("P-9", "김영수", { birth_date: "1970-01-01" })] }))).toMatchObject({ created: 0, updated: 1 });
+    expect(await count("SELECT COUNT(*) AS n FROM members")).toBe(1);
+  });
+
+  it("a '-' name row is ignored", async () => {
+    expect(await json(await roster([{ name: "-" }]))).toMatchObject({ created: 0, ambiguous: [] });
   });
 
   it("the sheet sync later links a roster person automatically (same name and birth date)", async () => {
@@ -389,5 +425,37 @@ describe("church roster import (no IDs) and auto-linking", () => {
     // Same name but no/other birth date -> still held for the pastor.
     await roster([{ name: "정", birth_date: "1970-01-01" }]);
     expect(await json(await sync({ people: [person("P-2", "정", { birth_date: "1971-01-01" })] }))).toMatchObject({ pending: 1 });
+  });
+});
+
+describe("audit fixes: registry dates and pending clean-up", () => {
+  beforeEach(resetDb);
+
+  it("registration dates before 2000 are accepted; future ones are refused", async () => {
+    expect((await sync({ people: [person("P-1", "오래된분", { registered_on: "1995-03-01" })] })).status).toBe(200);
+    expect((await sync({ people: [person("P-2", "미래", { registered_on: "2090-01-01" })] })).status).toBe(400);
+  });
+
+  it("a 1998 ordination and a 1999 status event can be recorded", async () => {
+    await sync({ people: [person("P-1", "장로님", { registered_on: "1990-01-01" })] });
+    const m = (await json(await call("GET", "/api/members", { as: EDITOR })))[0];
+    expect((await call("POST", `/api/registry/members/${m.id}/titles`, { as: PASTOR, body: { title_id: 6, start_date: "1998-05-01" } })).status).toBe(201);
+    expect((await call("POST", `/api/registry/members/${m.id}/status`, { as: PASTOR, body: { status_code: "inactive", event_date: "1999-01-01" } })).status).toBe(201);
+  });
+
+  it("a pending row resolved automatically later is cleared (no stale 'confirm' item)", async () => {
+    const hand = await newMember("송");
+    await sync({ people: [person("P-1", "송", { birth_date: "1984-12-21" })] }); // -> pending (hand-entered has no birth date)
+    expect(await count("SELECT COUNT(*) AS n FROM sync_pending")).toBe(1);
+    await call("PATCH", `/api/members/${hand.id}`, { as: PASTOR, body: { birth_date: "1984-12-21" } });
+    expect(await json(await sync({ people: [person("P-1", "송", { birth_date: "1984-12-21" })] }))).toMatchObject({ updated: 1, pending: 0 });
+    expect(await count("SELECT COUNT(*) AS n FROM sync_pending")).toBe(0);
+  });
+
+  it("birth dates can be set by the pastor, not in the future, and not by editors", async () => {
+    const m = await newMember("x");
+    expect((await call("PATCH", `/api/members/${m.id}`, { as: PASTOR, body: { birth_date: "2099-01-01" } })).status).toBe(400);
+    expect((await call("PATCH", `/api/members/${m.id}`, { as: EDITOR, body: { birth_date: "1990-01-01" } })).status).toBe(403);
+    expect((await call("PATCH", `/api/members/${m.id}`, { as: PASTOR, body: { birth_date: "1990-01-01" } })).status).toBe(200);
   });
 });

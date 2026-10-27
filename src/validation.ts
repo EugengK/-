@@ -8,6 +8,21 @@ export function isRealDate(value: string): boolean {
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
 }
 
+/** 1900–2100: for things that can be long ago (registration, ordination, birth). */
+export const historicalDate = z
+  .string()
+  .refine((v) => isRealDate(v) && v >= "1900-01-01" && v <= "2100-12-31", "1900~2100년 사이의 실제 날짜(YYYY-MM-DD)여야 합니다.");
+
+/** Same, but not in the future (Hobart today). Imported lazily to keep this module dependency-free. */
+export function pastDate(today: () => string) {
+  return historicalDate.refine((v) => v <= today(), "앞으로의 날짜는 넣을 수 없습니다.");
+}
+
+/** Comparison key for names: ignores spaces (incl. NBSP, full-width) and ASCII case. */
+export function nameKey(name: string): string {
+  return name.normalize("NFC").replace(/[\s\u00A0\u3000]+/g, "").toLowerCase();
+}
+
 export const isoDate = z
   .string()
   .refine((v) => isRealDate(v) && v >= "2000-01-01" && v <= "2100-12-31", "2000~2100년 사이의 실제 날짜(YYYY-MM-DD)여야 합니다.");

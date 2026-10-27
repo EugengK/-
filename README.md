@@ -48,7 +48,9 @@ npm run dev                    # 브라우저에서 http://localhost:8787 을 �
 3. `scripts/add-user.example.sql`을 `scripts/add-user.sql`로 복사해 이메일을 고친 뒤 실행
 4. Cloudflare Zero Trust에서 이 앱(예: `finance.교회도메인`)에 **Access 애플리케이션**을 만들고, 허용 이메일을 위 3명으로 제한
 5. Access 애플리케이션의 **AUD 태그**와 팀 도메인(`<팀>.cloudflareaccess.com`)을 `wrangler.jsonc`의 `ACCESS_AUD`, `ACCESS_TEAM_DOMAIN`에 입력 (비어 있으면 모든 요청을 거부합니다)
-6. `npx wrangler deploy`
+6. `wrangler.jsonc`에 Access로 보호되는 주소를 `routes`로 추가 (예: `{ "pattern": "finance.교회도메인", "custom_domain": true }`). `workers.dev` 주소와 미리보기 주소는 꺼 두었습니다.
+7. `npx wrangler secret put SYNC_TOKEN` (시트 연동을 쓸 때)
+8. `npx wrangler deploy`
 
 `ENVIRONMENT`는 운영에서 `production`으로 두세요. `development`일 때만, 그리고 `localhost` 요청에서만 `DEV_AUTH_EMAIL` 로그인 우회가 동작합니다.
 
@@ -59,6 +61,7 @@ npm run dev                    # 브라우저에서 http://localhost:8787 을 �
 서버 배포 전에는 교적부 화면의 **목양 시트에서 가져오기 (CSV)**로 같은 일을 할 수 있습니다.
 
 1. 서버 쪽: `npx wrangler secret put SYNC_TOKEN` (32자 이상 임의 문자열)
+   - 이 토큰은 시트의 스크립트 속성에 저장되므로, **시트 편집 권한이 있는 사람은 볼 수 있습니다.** 목양 시트의 편집 권한은 목사님만 가지시고, 공유 범위가 바뀌면 토큰을 새로 바꾸세요.
 2. 시트 쪽: [apps-script/registry-sync.gs](apps-script/registry-sync.gs) 맨 위 설명대로 붙여넣고, 스크립트 속성에 주소와 토큰을 넣고, `setupTriggers`를 한 번 실행
 3. Cloudflare Access가 이 주소를 막고 있으므로, Access에서 **서비스 토큰**을 만들어 스크립트 속성 `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET`에 넣고, Access 정책에 그 서비스 토큰을 허용하세요.
 

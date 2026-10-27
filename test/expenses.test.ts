@@ -215,3 +215,97 @@ describe("weekly stipend paid monthly, and editing expenses", () => {
     expect((await call("PATCH", `/api/expenses/${e.id}`, { as: EDITOR, body: { total_cents: 1 } })).status).toBe(409);
   });
 });
+
+describe("audit fixes: fixed costs and expenses", () => {
+  beforeEach(resetDb);
+  const today = todayInHobart();
+  const wd = (d: string) => new Date(`${d}T00:00:00Z`).getUTCDay();
+  const rent = { name: "렌트", amount_cents: 15000, account: "bank", rule: "weekly", weekday: wd(addDays(today, 2)), start_date: today };
+  const due = async () => (await json(await call("GET", "/api/expenses/due", { as: EDITOR }))).items;
+
+  it("stop then restart the same day brings back this week's payment (audited both ways)", async () => {
+    const r = await json(await call("POST", "/api/recurring-expenses", { as: EDITOR, body: rent }));
+    expect(await due()).toHaveLength(1);
+    await call("PATCH", `/api/recurring-expenses/${r.id}`, { as: EDITOR, body: { is_active: false } });
+    expect(await due()).toHaveLength(0);
+    expect(await count("SELECT COUNT(*) AS n FROM audit_log WHERE table_name='expenses' AND action='void'")).toBe(1);
+    await call("PATCH", `/api/recurring-expenses/${r.id}`, { as: EDITOR, body: { is_active: true } });
+    const back = await due();
+    expect(back).toHaveLength(1);
+    expect(await count("SELECT COUNT(*) AS n FROM expenses")).toBe(1); // revived, not duplicated
+  });
+
+  it("end date pulled in then cleared brings the payment back", async () => {
+    const r = await json(await call("POST", "/api/recurring-expenses", { as: EDITOR, body: rent }));
+    await due();
+    await call("PATCH", `/api/recurring-expenses/${r.id}`, { as: EDITOR, body: { end_date: today } });
+    expect(await due()).toHaveLength(0);
+    await call("PATCH", `/api/recurring-expenses/${r.id}`, { as: EDITOR, body: { end_date: null } });
+    expect(await due()).toHaveLength(1);
+  });
+
+  it("stopping keeps overdue unpaid rows (still owed); a person's skip is never revived", async () => {
+    const r = await json(await call("POST", "/api/recurring-expenses", { as: EDITOR, body: { ...rent, weekday: wd(addDays(today, -3)), start_date: addDays(today, -30) } }));
+    await db.prepare("UPDATE recurring_expenses SET generate_from = ? WHERE id = ?").bind(addDays(today, -20), r.id).run();
+    const items = await due();
+    const overdue = items.filter((i: any) => i.overdue);
+    expect(overdue.length).toBeGreaterThan(0);
+    await call("POST", `/api/expenses/${overdue[0].id}/void`, { as: EDITOR, body: { reason: "면제" } });
+    await call("PATCH", `/api/recurring-expenses/${r.id}`, { as: EDITOR, body: { is_active: false } });
+    const left = await due();
+    expect(left.every((i: any) => i.overdue)).toBe(true);
+    expect(left.length).toBe(overdue.length - 1);
+    await call("PATCH", `/api/recurring-expenses/${r.id}`, { as: EDITOR, body: { is_active: true } });
+    expect(await count("SELECT COUNT(*) AS n FROM expenses WHERE id = ? AND status = 'void'", overdue[0].id)).toBe(1);
+  });
+
+  it("missed dates up to ~3 months back are filled in (but not before the rule existed)", async () => {
+    const r = await json(await call("POST", "/api/recurring-expenses", { as: EDITOR, body: { ...rent, start_date: addDays(today, -80) } }));
+    await db.prepare("UPDATE recurring_expenses SET generate_from = ? WHERE id = ?").bind(addDays(today, -70), r.id).run();
+    const items = await due();
+    expect(items.filter((i: any) => i.overdue).length).toBeGreaterThanOrEqual(9);
+    expect(items.every((i: any) => i.expense_date >= addDays(today, -70))).toBe(true);
+  });
+
+  it("no-op rule edit writes nothing; concurrent edits don't lose one silently", async () => {
+    const r = await json(await call("POST", "/api/recurring-expenses", { as: EDITOR, body: rent }));
+    const before = await count("SELECT COUNT(*) AS n FROM audit_log");
+    expect((await call("PATCH", `/api/recurring-expenses/${r.id}`, { as: EDITOR, body: { name: "렌트" } })).status).toBe(200);
+    expect(await count("SELECT COUNT(*) AS n FROM audit_log")).toBe(before);
+    const [a, b] = await Promise.all([
+      call("PATCH", `/api/recurring-expenses/${r.id}`, { as: EDITOR, body: { name: "렌트2" } }),
+      call("PATCH", `/api/recurring-expenses/${r.id}`, { as: EDITOR2, body: { amount_cents: 16000 } }),
+    ]);
+    const row = await db.prepare("SELECT name, amount_cents FROM recurring_expenses WHERE id = ?").bind(r.id).first<any>();
+    if (a.status === 200) expect(row.name).toBe("렌트2");
+    if (b.status === 200) expect(row.amount_cents).toBe(16000);
+    expect([a.status, b.status].every((s) => s === 200 || s === 409)).toBe(true);
+  });
+
+  it("pay below GST -> 400, not a server error; pay can set the actual pay date", async () => {
+    await call("POST", "/api/recurring-expenses", { as: EDITOR, body: rent });
+    const [item] = await due();
+    await call("PATCH", `/api/expenses/${item.id}`, { as: EDITOR, body: { gst_cents: 1000 } });
+    expect((await call("POST", `/api/expenses/${item.id}/pay`, { as: EDITOR, body: { total_cents: 500 } })).status).toBe(400);
+    const ok = await call("POST", `/api/expenses/${item.id}/pay`, { as: EDITOR, body: { expense_date: today } });
+    expect(await json(ok)).toMatchObject({ status: "confirmed", expense_date: today });
+  });
+
+  it("a resent one-off expense is saved once", async () => {
+    const body = { expense_date: "2026-11-01", vendor: "Coles", total_cents: 4550, account: "cash", client_key: "exp-key-0001" };
+    const [a, b] = await Promise.all([call("POST", "/api/expenses", { as: EDITOR, body }), call("POST", "/api/expenses", { as: EDITOR, body })]);
+    expect([a.status, b.status].sort()).toEqual([200, 201]);
+    expect((await call("POST", "/api/expenses", { as: EDITOR, body })).status).toBe(200);
+    expect(await count("SELECT COUNT(*) AS n FROM expenses")).toBe(1);
+  });
+
+  it("department filter applies to the totals too", async () => {
+    const d = await json(await call("POST", "/api/departments", { as: EDITOR, body: { name: "교육부" } }));
+    const post = (b: object) => call("POST", "/api/expenses", { as: EDITOR, body: { expense_date: "2026-11-01", vendor: "x", account: "cash", ...b } });
+    await post({ total_cents: 1000, department_id: d.id });
+    await post({ total_cents: 5000 });
+    const s = await json(await call("GET", `/api/expenses/summary?from=2026-11-01&to=2026-11-30&department_id=${d.id}`, { as: PASTOR }));
+    expect(s.paid_cents).toBe(1000);
+    expect(await json(await call("GET", `/api/expenses?from=2026-11-01&to=2026-11-30&department_id=${d.id}`, { as: PASTOR }))).toHaveLength(1);
+  });
+});

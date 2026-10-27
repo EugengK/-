@@ -4,4 +4,5 @@
 -- Use the same email the person logs in with through Cloudflare Access.
 INSERT INTO users (email, name, role) VALUES ('editor1@example.com', '기록 담당 1', 'editor');
 INSERT INTO users (email, name, role) VALUES ('editor2@example.com', '기록 담당 2', 'editor');
-INSERT INTO users (email, name, role) VALUES ('pastor@example.com', '담임목사', 'viewer');
+-- The pastor: reads the finances, manages the 교적부.
+INSERT INTO users (email, name, role, registry_admin) VALUES ('pastor@example.com', '담임목사', 'viewer', 1);

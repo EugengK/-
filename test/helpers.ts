@@ -20,6 +20,7 @@ export async function resetDb() {
     "audit_log",
     "member_titles",
     "member_status_events",
+    "sync_pending",
     "expense_items",
     "expenses",
     "recurring_expenses",

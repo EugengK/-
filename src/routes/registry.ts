@@ -6,7 +6,7 @@ import { todayInHobart } from "../dates";
 import { CURRENT_STATUS, CURRENT_TITLE, SYNC_ACTIVE_SQL } from "../registrySql";
 import type { AppEnv } from "../types";
 import { applyPeople, applyRoster, firstTitleStatements, loadTitles, peopleSchema, rosterSchema } from "./sync";
-import { isUniqueViolation, isoDate, name, optionalText, parseBody, reason } from "../validation";
+import { historicalDate, isUniqueViolation, name, optionalText, parseBody, pastDate, reason } from "../validation";
 
 const STATUS_CODES = ["registered", "attending", "inactive", "left", "transferred", "returned", "deceased"] as const;
 
@@ -148,7 +148,7 @@ registryRoutes.get("/members/:id{[0-9]+}", async (c) => {
 // ---------- 직분 이력 ----------
 
 const assignSchema = z
-  .object({ title_id: z.number().int().positive(), start_date: isoDate, end_date: isoDate.nullable().optional(), note: optionalText(300) })
+  .object({ title_id: z.number().int().positive(), start_date: historicalDate, end_date: historicalDate.nullable().optional(), note: optionalText(300) })
   .strict();
 
 registryRoutes.post("/members/:id{[0-9]+}/titles", async (c) => {
@@ -195,9 +195,8 @@ registryRoutes.post("/member-titles/:id{[0-9]+}/void", async (c) => {
 // Future dates are refused: the current status (and who appears in the giver list) is the latest
 // event, so a change recorded ahead of time would take effect immediately.
 const statusSchema = z
-  .object({ status_code: z.enum(STATUS_CODES), event_date: isoDate, note: optionalText(300) })
-  .strict()
-  .refine((v) => v.event_date <= todayInHobart(), { message: "앞으로의 날짜는 기록할 수 없습니다. 그날이 되면 기록하세요.", path: ["event_date"] });
+  .object({ status_code: z.enum(STATUS_CODES), event_date: pastDate(todayInHobart), note: optionalText(300) })
+  .strict();
 
 registryRoutes.post("/members/:id{[0-9]+}/status", async (c) => {
   const memberId = Number(c.req.param("id"));
@@ -307,7 +306,9 @@ registryRoutes.post(`${CODE}/link`, async (c) => {
   const { title } = (await loadTitles(db))(p.title);
   const hasTitle = await db.prepare("SELECT 1 FROM member_titles WHERE member_id = ?").bind(body.member_id).first();
   const user = c.get("user");
-  const [u] = await db.batch([
+  let u: D1Result | undefined;
+  try {
+    [u] = await db.batch([
     db
       .prepare("UPDATE members SET member_code = ?, family_code = ?, relation = ?, birth_date = ? WHERE id = ? AND member_code IS NULL")
       .bind(after.member_code, after.family_code, after.relation, after.birth_date, body.member_id),
@@ -315,6 +316,11 @@ registryRoutes.post(`${CODE}/link`, async (c) => {
     // changes() here is the audit insert, which only happened if the link above did.
     db.prepare("DELETE FROM sync_pending WHERE member_code = ? AND changes() > 0").bind(p.member_code),
   ]);
+  } catch (err) {
+    // The sheet already linked this 교인ID to someone else (e.g. by a later automatic match).
+    if (isUniqueViolation(err)) throw new HTTPException(409, { message: "이 교인ID는 이미 다른 분과 연결되어 있습니다. 새로고침하세요." });
+    throw err;
+  }
   if (u!.meta.changes === 0) throw new HTTPException(409, { message: "이미 다른 교인ID와 연결된 분입니다." });
   if (title && !hasTitle) {
     await db.batch(firstTitleStatements(db, user, p.member_code, title, p.registered_on ?? todayInHobart()));
