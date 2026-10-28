@@ -13,8 +13,8 @@
     {
       "binding": "DB",
       "database_name": "church-accounting",
-      // Replace with the id printed by `wrangler d1 create church-accounting`.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      // Created 2026-10-29 in region OC (hobartchurch@gmail.com account).
+      "database_id": "4f4a0907-6798-45a3-9b1a-e8289b32c97f",
       "migrations_dir": "migrations"
     }
   ],
