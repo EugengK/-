@@ -37,7 +37,13 @@ describe("period report", () => {
     await seed();
     const s = await json(await call("GET", "/api/reports/summary?from=2026-07-01&to=2026-09-30", { as: PASTOR }));
     expect(s.notes.length).toBeGreaterThan(0);
-    expect(s.balances.find((b: any) => b.account === "cash").end_cents).toBeNull(); // whole period before the opening date
+    expect(s.balances.find((b: any) => b.account === "cash")).toMatchObject({ start_cents: null, end_cents: null }); // whole period before
+    // Straddling the opening date: no start balance (it would not add up), but the end balance is known.
+    const y = await json(await call("GET", "/api/reports/summary?from=2026-01-01&to=2026-12-31", { as: PASTOR }));
+    expect(y.balances.find((b: any) => b.account === "cash")).toMatchObject({ start_cents: null, end_cents: 145450 });
+    // Starting exactly on the opening date: start is the opening amount.
+    const q = await json(await call("GET", "/api/reports/summary?from=2026-10-01&to=2026-12-31", { as: PASTOR }));
+    expect(q.balances.find((b: any) => b.account === "cash")).toMatchObject({ start_cents: 100000, end_cents: 145450 });
   });
 
   it("validates the period", async () => {

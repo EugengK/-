@@ -46,9 +46,16 @@ export async function buildSummary(db: D1Database, from: string, to: string) {
       balances.push({ account, opening: null, as_of_date: null, start_cents: null, end_cents: null });
       continue;
     }
-    const start = from <= ob.as_of_date ? ob.amount_cents : ob.amount_cents + (await net(db, account, ob.as_of_date, addDays(from, -1)));
+    // Before the opening date there is no known balance, so a period starting earlier has no start
+    // balance (showing the opening amount there would not add up with the period's income/expenses).
+    const start = from < ob.as_of_date ? null
+      : from === ob.as_of_date ? ob.amount_cents
+      : ob.amount_cents + (await net(db, account, ob.as_of_date, addDays(from, -1)));
     const end = to < ob.as_of_date ? null : ob.amount_cents + (await net(db, account, ob.as_of_date, to));
-    if (from < ob.as_of_date) notes.push(`${account === "cash" ? "현금" : "은행"}: 기간이 시작 잔액 기준일(${ob.as_of_date}) 이전부터라, 그 전의 입출금은 잔액에 들어가지 않습니다.`);
+    if (from < ob.as_of_date) {
+      const label = account === "cash" ? "현금" : "은행";
+      notes.push(`${label}: 시작 잔액 기준일(${ob.as_of_date}, $${(ob.amount_cents / 100).toLocaleString("en-AU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })})보다 앞선 기간이 들어 있어 기간 시작 잔액을 계산할 수 없습니다. 기준일부터 고르시면 잔액이 맞게 나옵니다.`);
+    }
     balances.push({ account, opening: ob.amount_cents, as_of_date: ob.as_of_date, start_cents: start, end_cents: end });
   }
   if (balances.some((b) => b.opening === null)) notes.push("시작 잔액이 입력되지 않은 계정은 잔액을 계산하지 않습니다 (설정 → 시작 잔액).");

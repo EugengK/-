@@ -57,7 +57,8 @@ function monthRange() {
 /** Strict real-date check (rejects 1960-02-30, which Date.parse accepts). */
 function isRealYmd(v) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
-  return new Date(`${v}T00:00:00Z`).toISOString().slice(0, 10) === v;
+  const d = new Date(`${v}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
 }
 
 let toastTimer;
@@ -1429,6 +1430,7 @@ async function renderReports() {
     h("option", { value: "year" }, "연간"), h("option", { value: "q1" }, "1분기"), h("option", { value: "q2" }, "2분기"),
     h("option", { value: "q3" }, "3분기"), h("option", { value: "q4" }, "4분기"), h("option", { value: "custom" }, "직접 지정"));
   part.value = saved.part || "year";
+  if (!part.value) part.value = "year"; // an unknown saved value leaves the select empty
   const from = h("input", { type: "date", "aria-label": "시작일" });
   const to = h("input", { type: "date", "aria-label": "종료일" });
   const out = h("div");
