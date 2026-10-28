@@ -13,7 +13,7 @@
     {
       "binding": "DB",
       "database_name": "church-accounting",
-      // Created 2026-10-29 in region OC (hobartchurch@gmail.com account).
+      // Production database, region OC (hobartchurch@gmail.com account).
       "database_id": "4f4a0907-6798-45a3-9b1a-e8289b32c97f",
       "migrations_dir": "migrations"
     }
