@@ -2,8 +2,9 @@
   "name": "church-accounting",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
-  // Only the Access-protected custom domain should serve this app (add it under "routes" before
-  // the first deploy, e.g. { "pattern": "finance.<church domain>", "custom_domain": true }).
+  // Only the Access-protected custom domain serves this app. Never add the main site
+  // (hobartchurch.org) here. See DEPLOY.md.
+  "routes": [{ "pattern": "finance.hobartchurch.org", "custom_domain": true }],
   "workers_dev": false,
   "preview_urls": false,
   // The screens (HTML/JS/CSS) contain no data; all data comes from /api, which requires login.

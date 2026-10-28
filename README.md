@@ -53,6 +53,8 @@ npm run dev                    # 브라우저에서 http://localhost:8787 을 �
 
 ## 배포 (아직 한 번도 실제 Cloudflare에 배포해 보지 않았습니다)
 
+**실제 배포는 [DEPLOY.md](DEPLOY.md)를 따르세요** (주소: `finance.hobartchurch.org`, 하지 말 것 목록, 배포 후 확인 포함). 아래는 요약입니다.
+
 1. `npx wrangler d1 create church-accounting` → 출력된 `database_id`를 `wrangler.jsonc`에 입력
 2. `npm run db:migrate:remote`
 3. `scripts/add-user.example.sql`을 `scripts/add-user.sql`로 복사해 이메일을 고친 뒤 실행
