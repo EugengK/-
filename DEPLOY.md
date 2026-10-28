@@ -26,19 +26,36 @@
 
 ## 1. 준비 확인
 
-- Cloudflare 계정에 `hobartchurch.org` 존(zone)이 있고, **Workers 유료 플랜(Workers Paid)**이 켜져 있는지 확인한다.
-  무료 플랜은 요청 하나당 D1 쿼리 수 제한이 작아(50개) 헌금 여러 줄 저장 등이 실패할 수 있다.
-- DNS에 `finance.hobartchurch.org` 레코드가 **이미 있는지** 확인한다. 있으면 멈추고 보고한다(다른 용도로 쓰는 중일 수 있음).
-- 저장소 루트에서:
+**브라우저 자동화 없이 진행한다.** 이 문서의 명령은 모두 터미널에서 실행한다.
+Cloudflare 대시보드에서 해야 하는 일(아래 1-A, 4단계)은 AI 도구가 브라우저를 직접 조작하지 말고 **목사님께 요청**한다.
+
+### 1-A. 목사님이 직접 (Cloudflare 대시보드, 브라우저)
+
+- 왼쪽 메뉴 **Websites(도메인)** 목록에 `hobartchurch.org`가 있는지
+- **Workers & Pages → Plans**(요금제)에서 **Workers Paid**가 켜져 있는지
+  (무료 플랜은 요청 하나당 D1 쿼리 수 제한이 작아(50개) 헌금 여러 줄 저장 등이 실패할 수 있다.)
+- 맥의 터미널에서 이 저장소 폴더로 가서 Cloudflare 로그인 (브라우저 창이 열리면 **허용**):
+
+```sh
+npx wrangler login
+```
+
+  로그인 정보는 이 맥에 저장되므로, 같은 맥에서 일하는 AI 도구도 이후 명령을 쓸 수 있다.
+  (AI 도구가 맥이 아닌 다른 곳(클라우드)에서 돌아간다면 이 로그인이 전달되지 않는다 — 그 경우 멈추고 보고한다.)
+
+### 1-B. AI 도구가 (터미널)
 
 ```sh
 git checkout claude/church-accounting-plan && git pull
 npm ci
 npx tsc --noEmit
-npx vitest run          # 전부 통과해야 함
-npx wrangler login      # 교회 Cloudflare 계정으로
-npx wrangler whoami     # 계정 이름 확인
+npx vitest run                         # 전부 통과해야 함
+npx wrangler whoami                    # 로그인된 계정 이름 확인 → 목사님께 보여 드리고 맞는지 확인
+dig +short finance.hobartchurch.org    # 아무것도 안 나와야 정상
 ```
+
+- `wrangler whoami`가 로그인 안 됨으로 나오면 멈추고 목사님께 1-A의 로그인을 요청한다. **브라우저를 직접 띄우려 하지 않는다.**
+- `dig` 결과가 나오면(이미 그 주소가 쓰이는 중) 멈추고 보고한다.
 
 ## 2. 데이터베이스 만들기
 
@@ -71,7 +88,7 @@ npx wrangler d1 execute church-accounting --remote --command "SELECT email, role
 
 정확히 3줄이 나와야 한다. (`@system.local` 두 줄은 시스템용으로 원래 있고, 로그인할 수 없다.)
 
-## 4. 로그인 보호 — Cloudflare Access (배포보다 먼저)
+## 4. 로그인 보호 — Cloudflare Access (배포보다 먼저, **목사님이 대시보드에서**)
 
 Cloudflare 대시보드 → Zero Trust → Access → Applications → **Self-hosted** 애플리케이션 추가
 (메뉴 이름은 Cloudflare 화면 변경에 따라 조금 다를 수 있음)
