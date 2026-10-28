@@ -8,6 +8,7 @@ import { memberRoutes } from "./routes/members";
 import { offeringRoutes } from "./routes/offerings";
 import { openingBalanceRoutes } from "./routes/openingBalances";
 import { registryRoutes } from "./routes/registry";
+import { reportRoutes } from "./routes/reports";
 import { syncRoutes } from "./routes/sync";
 import type { AppEnv, TokenVerifier } from "./types";
 
@@ -46,6 +47,7 @@ export function createApp(verify: TokenVerifier = accessVerifier) {
   app.route("/api/registry", registryRoutes);
   app.route("/api/expenses", expenseRoutes);
   app.route("/api/recurring-expenses", recurringRoutes);
+  app.route("/api/reports", reportRoutes);
 
   app.notFound((c) => c.json({ error: "찾을 수 없습니다." }, 404));
   app.onError((err, c) => {

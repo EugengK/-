@@ -77,3 +77,4 @@ tr.planned-row td { color: #5b6270; font-style: italic; }
 .actions { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; white-space: normal; margin-top: 4px; }
 td.num .tag, td .tag { white-space: nowrap; }
 button.mini { min-height: 36px; padding: 4px 10px; }
+tr.strong-row td { font-weight: 700; background: var(--brand-soft); }

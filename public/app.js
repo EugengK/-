@@ -1391,18 +1391,174 @@ async function renderAudit() {
     more.hidden = rows.length < 50;
   };
   more.onclick = () => act(more, load);
-  paint(ticket, h("h2", {}, "변경 기록"), h("p", { class: "muted" }, "누가, 언제, 무엇을 바꿨는지 모두 남습니다. 지울 수 없습니다."), h("div", { class: "card" }, list), more);
+  paint(ticket, h("h2", {}, "보고·기록"), reportSeg("audit"), h("p", { class: "muted mt" }, "누가, 언제, 무엇을 바꿨는지 모두 남습니다. 지울 수 없습니다."), h("div", { class: "card" }, list), more);
+  await act(null, load);
+}
+
+// ---------- 보고서 · 내보내기 ----------
+
+const reportSeg = (active) =>
+  h("div", { class: "seg mt", role: "tablist" },
+    h("button", { type: "button", class: active === "reports" ? "on" : "", onclick: () => { location.hash = "#reports"; } }, "보고서·내보내기"),
+    h("button", { type: "button", class: active === "audit" ? "on" : "", onclick: () => { location.hash = "#audit"; } }, "변경 기록"));
+
+/** Quarter / year ranges for a fiscal year that starts in `startMonth` (1 = church, 7 = Australian). */
+function fiscalRange(startMonth, fyStartYear, part) {
+  const monthStart = (y, m) => `${y + Math.floor((m - 1) / 12)}-${pad(((m - 1) % 12) + 1)}-01`;
+  const lastDay = (y, m) => {
+    const yy = y + Math.floor((m - 1) / 12), mm = ((m - 1) % 12) + 1;
+    return `${yy}-${pad(mm)}-${pad(new Date(Date.UTC(yy, mm, 0)).getUTCDate())}`;
+  };
+  if (part === "year") return { from: monthStart(fyStartYear, startMonth), to: lastDay(fyStartYear, startMonth + 11) };
+  const q = Number(part.slice(1));
+  return { from: monthStart(fyStartYear, startMonth + 3 * (q - 1)), to: lastDay(fyStartYear, startMonth + 3 * q - 1) };
+}
+
+async function renderReports() {
+  const ticket = newTicket();
+  const churchStart = Number(state.settings.church_fiscal_year_start_month || 1);
+  const auStart = Number(state.settings.au_fiscal_year_start_month || 7);
+  const saved = (() => { try { return JSON.parse(localStorage.getItem("report-period") || "{}"); } catch { return {}; } })();
+
+  const basis = h("select", { "aria-label": "회계연도 기준" },
+    h("option", { value: "church" }, `교회 회계연도 (${churchStart}월 시작)`),
+    h("option", { value: "au" }, `호주 회계연도 (${auStart}월 시작)`));
+  basis.value = saved.basis === "au" ? "au" : "church";
+  const year = h("select", { "aria-label": "연도" });
+  const part = h("select", { "aria-label": "기간" },
+    h("option", { value: "year" }, "연간"), h("option", { value: "q1" }, "1분기"), h("option", { value: "q2" }, "2분기"),
+    h("option", { value: "q3" }, "3분기"), h("option", { value: "q4" }, "4분기"), h("option", { value: "custom" }, "직접 지정"));
+  part.value = saved.part || "year";
+  const from = h("input", { type: "date", "aria-label": "시작일" });
+  const to = h("input", { type: "date", "aria-label": "종료일" });
+  const out = h("div");
+
+  const startMonth = () => (basis.value === "au" ? auStart : churchStart);
+  const fillYears = () => {
+    const t = hobartToday();
+    const ty = +t.slice(0, 4), tm = +t.slice(5, 7);
+    const current = tm >= startMonth() ? ty : ty - 1; // the fiscal year we are in now
+    const keep = year.value;
+    year.replaceChildren(...[0, 1, 2, 3].map((i) => {
+      const y = current - i;
+      const label = startMonth() === 1 ? `${y}년` : `${y}-${String(y + 1).slice(2)} (${y}.${startMonth()}~${y + 1}.${startMonth() - 1})`;
+      return h("option", { value: y }, label);
+    }));
+    year.value = keep && [...year.options].some((o) => o.value === keep) ? keep : String(saved.basis === basis.value && saved.year ? saved.year : current);
+    if (!year.value) year.value = String(current);
+  };
+  const fillDates = () => {
+    const custom = part.value === "custom";
+    from.disabled = to.disabled = !custom;
+    year.disabled = custom;
+    if (!custom || !from.value || !to.value) {
+      // 직접 지정 starts from the dates last shown, or the chosen year when there are none.
+      const r = fiscalRange(startMonth(), Number(year.value), custom ? "year" : part.value);
+      from.value = r.from;
+      to.value = r.to;
+    }
+  };
+  const remember = () => {
+    try { localStorage.setItem("report-period", JSON.stringify({ basis: basis.value, year: year.value, part: part.value, from: from.value, to: to.value })); } catch { /* ignore */ }
+  };
+
+  let seq = 0;
+  const load = async () => {
+    const mine = ++seq;
+    if (!isRealYmd(from.value) || !isRealYmd(to.value)) { out.replaceChildren(h("p", { class: "notice" }, "기간을 고르세요.")); return; }
+    if (from.value > to.value) { out.replaceChildren(h("p", { class: "notice" }, "시작일이 종료일보다 늦습니다.")); return; }
+    const s = await api("GET", `/api/reports/summary?from=${from.value}&to=${to.value}`);
+    if (mine !== seq) return;
+    const b = (a) => s.balances.find((x) => x.account === a);
+    const m = (c) => (c === null || c === undefined ? "-" : money(c));
+    const both = (x, y) => (x === null || y === null ? null : x + y);
+    const row = (label, cash, bank, total, cls) => h("tr", { class: cls ?? "" }, h("td", {}, label), h("td", { class: "num" }, m(cash)), h("td", { class: "num" }, m(bank)), h("td", { class: "num" }, m(total)));
+    out.replaceChildren(...[
+      h("div", { class: "card" },
+        h("h3", {}, `${s.from} ~ ${s.to}`),
+        h("table", {},
+          h("thead", {}, h("tr", {}, h("th", {}, ""), h("th", { class: "num" }, "현금"), h("th", { class: "num" }, "은행·온라인"), h("th", { class: "num" }, "합계"))),
+          h("tbody", {},
+            row("기간 시작 잔액", b("cash").start_cents, b("bank").start_cents, both(b("cash").start_cents, b("bank").start_cents), "strong-row"),
+            row("+ 수입 (헌금)", s.income.cash_cents, s.income.online_cents, s.income.total_cents),
+            row("− 지출 (지급)", s.expenses.cash_cents, s.expenses.bank_cents, s.expenses.total_cents),
+            row("기간 끝 잔액", b("cash").end_cents, b("bank").end_cents, both(b("cash").end_cents, b("bank").end_cents), "strong-row"))),
+        s.planned_unpaid.count ? h("p", { class: "muted mt" }, `아직 지급하지 않은 고정 지출 ${s.planned_unpaid.count}건, ${money(s.planned_unpaid.total_cents)} (잔액에 들어가지 않음)`) : null,
+        ...s.notes.map((n) => h("p", { class: "notice mt" }, n))),
+      h("div", { class: "card" },
+        h("h3", {}, "수입 (헌금 종류별)"),
+        s.income.rows.length
+          ? h("table", {}, h("tbody", {}, s.income.rows.map((r) => h("tr", {}, h("td", {}, `${r.name} `, methodTag(r.method)), h("td", { class: "muted num" }, `${r.count}건`), h("td", { class: "num" }, money(r.total_cents))))))
+          : h("p", { class: "muted" }, "이 기간에 헌금이 없습니다.")),
+      h("div", { class: "card" },
+        h("h3", {}, "지출 (부서별)"),
+        s.expenses.by_department.length
+          ? h("table", {}, h("tbody", {}, s.expenses.by_department.map((r) => h("tr", {}, h("td", {}, r.name), h("td", { class: "muted num" }, `${r.count}건`), h("td", { class: "num" }, money(r.total_cents))))))
+          : h("p", { class: "muted" }, "이 기간에 지출이 없습니다."),
+        s.expenses.by_category.length ? h("h3", { class: "mt" }, "지출 (항목별)") : null,
+        s.expenses.by_category.length
+          ? h("table", {}, h("tbody", {}, s.expenses.by_category.map((r) => h("tr", {}, h("td", {}, r.name), h("td", { class: "muted num" }, `${r.count}건`), h("td", { class: "num" }, money(r.total_cents))))))
+          : null,
+        s.expenses.gst_cents ? h("p", { class: "muted mt" }, `지출 중 GST: ${money(s.expenses.gst_cents)}`) : null),
+    ].filter(Boolean));
+  };
+  const refresh = () => { fillDates(); remember(); act(null, load); };
+  basis.addEventListener("change", () => { fillYears(); refresh(); });
+  year.addEventListener("change", refresh);
+  part.addEventListener("change", refresh);
+  for (const el of [from, to]) el.addEventListener("change", () => { remember(); act(null, load); });
+
+  /** Downloads a CSV from the server (same login), keeping the server's file name. */
+  const download = (kind, label) => {
+    const btn = h("button", { type: "button", class: "secondary" }, label);
+    btn.onclick = () =>
+      act(btn, async () => {
+        if (!isRealYmd(from.value) || !isRealYmd(to.value) || from.value > to.value) throw new Error("기간을 확인하세요.");
+        const res = await fetch(`/api/reports/${kind}.csv?from=${from.value}&to=${to.value}`, { signal: AbortSignal.timeout(30000) });
+        if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? `내려받지 못했습니다 (${res.status})`);
+        const name = `${kind}_${from.value}_${to.value}.csv`; // same ASCII name the server sends
+        const url = URL.createObjectURL(await res.blob());
+        const a = h("a", { href: url, download: name });
+        document.body.append(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+        toast(`${name} 을(를) 내려받았습니다.`);
+      });
+    return btn;
+  };
+
+  fillYears();
+  if (part.value === "custom" && isRealYmd(saved.from ?? "") && isRealYmd(saved.to ?? "")) {
+    from.value = saved.from;
+    to.value = saved.to;
+  }
+  fillDates();
+  paint(ticket,
+    h("h2", {}, "보고·기록"),
+    reportSeg("reports"),
+    h("div", { class: "card mt" },
+      h("div", { class: "row" }, h("div", {}, h("label", {}, "기준"), basis)),
+      h("div", { class: "row mt" }, h("div", {}, h("label", {}, "연도"), year), h("div", {}, h("label", {}, "기간"), part)),
+      h("div", { class: "row mt" }, h("div", {}, h("label", {}, "시작일"), from), h("div", {}, h("label", {}, "종료일"), to))),
+    out,
+    h("div", { class: "card" },
+      h("h3", {}, "내보내기 (엑셀 · 넘버스 · 구글 시트)"),
+      h("p", { class: "muted" }, "위에서 고른 기간의 내역을 CSV 파일로 내려받습니다. 엑셀이나 넘버스에서 바로 열리고, 구글 시트에서는 [파일] → [가져오기]로 엽니다. 취소된 항목도 '상태'와 함께 들어 있고, '합계에 포함' 열을 더하면 화면의 합계와 같습니다."),
+      h("div", { class: "row" }, download("summary", "요약"), download("offerings", "헌금 내역"), download("expenses", "지출 내역"))),
+  );
   await act(null, load);
 }
 
 // ---------- routing ----------
 
-const routes = { entry: renderEntry, offerings: renderOfferings, expenses: renderExpenses, registry: renderRegistry, settings: renderSettings, audit: renderAudit };
+const routes = { entry: renderEntry, offerings: renderOfferings, expenses: renderExpenses, registry: renderRegistry, settings: renderSettings, reports: renderReports, audit: renderAudit };
 const roleText = () => `${state.me.name} · ${isEditor() ? "재정 기록" : "재정 열람"}${isRegistryAdmin() ? " · 교적부 관리" : ""}`;
 
 async function route() {
   const tab = currentTab();
-  for (const a of document.querySelectorAll(".tabs a")) a.classList.toggle("on", a.dataset.tab === tab);
+  const tabOf = tab === "audit" ? "reports" : tab; // 변경 기록 lives under the 보고·기록 tab
+  for (const a of document.querySelectorAll(".tabs a")) a.classList.toggle("on", a.dataset.tab === tabOf);
   view.replaceChildren(h("p", { class: "muted" }, "불러오는 중…"));
   const ticketBefore = renderTicket;
   try {
