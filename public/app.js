@@ -441,7 +441,7 @@ async function renderOfferings() {
               h("tbody", {}, rows.map((o) =>
                 h("tr", { class: o.status === "void" ? "void-row" : "" },
                   h("td", {}, o.offering_date, h("br"), h("span", { class: "muted" }, o.fund_type_name)),
-                  h("td", {}, o.member_name ?? (o.visitor_name || o.visitor_from
+                  h("td", {}, o.giver_hidden ? h("span", { class: "muted" }, "(이름은 목사님만)") : o.member_name ?? (o.visitor_name || o.visitor_from
                     ? [h("span", { class: "tag" }, "방문"), " ", [o.visitor_name, o.visitor_from && `(${o.visitor_from})`].filter(Boolean).join(" ")]
                     : "(무기명)"), " ", methodTag(o.method),
                     o.note ? h("div", { class: "muted" }, o.note) : null,
@@ -846,6 +846,10 @@ function expenseEntryCard(depts, cats) {
   let sentSig = null;
   eSave.onclick = () =>
     act(eSave, async () => {
+      if (!eAmount.value.trim()) {
+        eAmount.focus();
+        throw new Error("금액을 입력하세요. (사진에서 금액을 자동으로 읽는 기능은 다음 단계에서 추가됩니다)");
+      }
       const cents = toCents(eAmount.value);
       if (cents === null || cents <= 0) throw new Error("금액이 올바르지 않습니다. (예: 45.50)");
       if (!eVendor.value.trim()) throw new Error("지급처 / 내용을 입력하세요.");

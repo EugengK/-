@@ -2,7 +2,9 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { auditStatement } from "../audit";
-import type { AppEnv } from "../types";
+import { todayInHobart } from "../dates";
+import { addDays } from "../schedule";
+import type { AppEnv, AppUser } from "../types";
 import { isRealDate, isUniqueViolation, isoDate, optionalText, parseBody, reason } from "../validation";
 
 interface OfferingRow {
@@ -98,7 +100,31 @@ function filters(q: (k: string) => string | undefined) {
 
 export const offeringRoutes = new Hono<AppEnv>();
 
+/**
+ * Finance editors can re-check who gave what for the last week (to catch entry mistakes). Older
+ * giving per person - and any per-person filter or total - is the pastor's alone, so nobody is
+ * seen through what they have given over time.
+ */
+export const NAMES_VISIBLE_DAYS = 7;
+
+export function seesGivers(user: AppUser) {
+  return user.registry_admin;
+}
+
+function hideOldGivers(rows: OfferingRow[], user: AppUser) {
+  if (seesGivers(user)) return rows;
+  const cutoff = addDays(todayInHobart(), -(NAMES_VISIBLE_DAYS - 1));
+  return rows.map((r) => (r.offering_date >= cutoff ? r : { ...r, member_id: null, member_name: null, visitor_name: null, giver_hidden: true }));
+}
+
+function refusePerPerson(c: { req: { query: (k: string) => string | undefined }; get: (k: "user") => AppUser }) {
+  if (c.req.query("member_id") && !seesGivers(c.get("user"))) {
+    throw new HTTPException(403, { message: "성도별 헌금은 담임목사만 볼 수 있습니다." });
+  }
+}
+
 offeringRoutes.get("/", async (c) => {
+  refusePerPerson(c);
   const { where, binds } = filters((k) => c.req.query(k));
   if (c.req.query("include_void") !== "1") where.push("o.status = 'active'");
   const { results } = await c.env.DB.prepare(
@@ -107,11 +133,12 @@ offeringRoutes.get("/", async (c) => {
   )
     .bind(...binds)
     .all<OfferingRow>();
-  return c.json(results);
+  return c.json(hideOldGivers(results, c.get("user")));
 });
 
 /** Totals per offering type and method (active rows only). Works for one member too (member_id=). */
 offeringRoutes.get("/summary", async (c) => {
+  refusePerPerson(c);
   const { where, binds } = filters((k) => c.req.query(k));
   where.push("o.status = 'active'");
   const { results } = await c.env.DB.prepare(

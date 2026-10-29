@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { addDays } from "../schedule";
 import type { AppEnv } from "../types";
+import { seesGivers } from "./offerings";
 import { isRealDate } from "../validation";
 
 /**
@@ -156,12 +157,15 @@ reportRoutes.get("/offerings.csv", async (c) => {
   )
     .bind(from, to)
     .all<Record<string, any>>();
+  // Who gave is the pastor's alone (see offerings.ts); others get the same rows without names.
+  const hide = !seesGivers(c.get("user"));
   return csv(`offerings_${from}_${to}.csv`, [
     ["날짜", "헌금 종류", "방식", "구분", "성도", "교인ID", "방문자 출신", "금액(AUD)", "합계에 포함", "상태", "취소 사유", "메모", "입력 시각(UTC)"],
     ...results.map((r) => [
       r.offering_date, r.fund, METHOD[r.method] ?? r.method,
       r.member ? "교인" : r.visitor_name || r.visitor_from ? "방문자" : "무기명",
-      r.member ?? r.visitor_name ?? "(무기명)", r.member_code, r.visitor_from, dollars(r.amount_cents),
+      hide ? (r.member || r.visitor_name ? "(목사님만 열람)" : "(무기명)") : r.member ?? r.visitor_name ?? "(무기명)",
+      hide ? null : r.member_code, r.visitor_from, dollars(r.amount_cents),
       r.status === "active" ? dollars(r.amount_cents) : 0, r.status === "active" ? "정상" : "취소", r.void_reason, r.note, r.created_at,
     ]),
   ]);

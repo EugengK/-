@@ -277,3 +277,56 @@ describe("phase 2 review fixes", () => {
     expect((await json(await call("GET", "/api/offerings/summary", { as: PASTOR }))).total_cents).toBe(2000);
   });
 });
+
+describe("who gave what: finance editors see only the last week; totals per person are the pastor's", () => {
+  beforeEach(resetDb);
+
+  it("names stay visible for 7 days, then only the pastor sees them; no per-person filter or total for editors", async () => {
+    const { todayInHobart } = await import("../src/dates");
+    const { addDays } = await import("../src/schedule");
+    const today = todayInHobart();
+    const m = await member("김철수");
+    const give = (date: string) => call("POST", "/api/offerings", { as: EDITOR, body: { offering_date: date, entries: [
+      { fund_type_id: 2, amount_cents: 10000, method: "cash", member_id: m.id },
+      { fund_type_id: 1, amount_cents: 500, method: "cash", visitor_name: "홍길동", visitor_from: "시드니" },
+    ] } });
+    await give(today);
+    await give(addDays(today, -6)); // still "this week"
+    await give(addDays(today, -7)); // older
+
+    const q = `from=${addDays(today, -30)}&to=${today}`;
+    const seen = await json(await call("GET", `/api/offerings?${q}`, { as: EDITOR }));
+    const recent = seen.filter((o: any) => o.offering_date >= addDays(today, -6));
+    const old = seen.filter((o: any) => o.offering_date < addDays(today, -6));
+    expect(recent.map((o: any) => o.member_name ?? o.visitor_name).sort()).toEqual(["김철수", "김철수", "홍길동", "홍길동"]);
+    expect(old).toHaveLength(2);
+    expect(old.every((o: any) => o.giver_hidden && o.member_id === null && o.member_name === null && o.visitor_name === null)).toBe(true);
+    expect(old.map((o: any) => o.amount_cents).sort((a: number, b: number) => a - b)).toEqual([500, 10000]); // amounts and totals still add up
+    expect(old.find((o: any) => o.amount_cents === 500).visitor_from).toBe("시드니");
+
+    const pastor = await json(await call("GET", `/api/offerings?${q}`, { as: PASTOR }));
+    expect(pastor.filter((o: any) => o.member_name === "김철수")).toHaveLength(3);
+
+    expect((await call("GET", `/api/offerings?${q}&member_id=${m.id}`, { as: EDITOR })).status).toBe(403);
+    expect((await call("GET", `/api/offerings/summary?${q}&member_id=${m.id}`, { as: EDITOR })).status).toBe(403);
+    expect((await call("GET", `/api/offerings/summary?${q}&member_id=${m.id}`, { as: PASTOR })).status).toBe(200);
+    const sum = await json(await call("GET", `/api/offerings/summary?${q}`, { as: EDITOR }));
+    expect(sum.total_cents).toBe(31500); // church totals are not affected
+
+    // the change log doesn't give the giver away either
+    const log = await json(await call("GET", "/api/audit-log?limit=50", { as: EDITOR }));
+    const offeringRows = log.filter((a: any) => a.table_name === "offerings");
+    expect(offeringRows.length).toBeGreaterThan(0);
+    expect(offeringRows.every((a: any) => a.after.member_id === undefined && a.after.visitor_name === undefined)).toBe(true);
+    const pastorLog = await json(await call("GET", "/api/audit-log?limit=50", { as: PASTOR }));
+    expect(pastorLog.some((a: any) => a.table_name === "offerings" && a.after.member_id === m.id)).toBe(true);
+
+    // CSV: rows and amounts, no names or IDs for editors
+    const csvText = async (as: string) => new TextDecoder().decode(await (await call("GET", `/api/reports/offerings.csv?${q}`, { as })).arrayBuffer());
+    const editorCsv = await csvText(EDITOR);
+    expect(editorCsv).not.toContain("김철수");
+    expect(editorCsv).not.toContain("홍길동");
+    expect(editorCsv).toContain(",교인,(목사님만 열람),,");
+    expect(await csvText(PASTOR)).toContain("김철수");
+  });
+});

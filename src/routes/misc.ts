@@ -54,11 +54,23 @@ auditRoutes.get("/", async (c) => {
   )
     .bind(...binds)
     .all<AuditRow>();
+  // Offering entries name the giver (member_id, visitor_name): the pastor's alone, like the list.
+  const pastor = c.get("user").registry_admin;
+  const open = (json: string | null, table: string) => {
+    if (!json) return null;
+    const v = JSON.parse(json);
+    if (!pastor && table === "offerings" && v && typeof v === "object") {
+      delete v.member_id;
+      delete v.visitor_name;
+      delete v.member_name;
+    }
+    return v;
+  };
   return c.json(
     results.map(({ before_json, after_json, ...rest }) => ({
       ...rest,
-      before: before_json ? JSON.parse(before_json) : null,
-      after: after_json ? JSON.parse(after_json) : null,
+      before: open(before_json, rest.table_name),
+      after: open(after_json, rest.table_name),
     })),
   );
 });
