@@ -11,6 +11,8 @@ export function auditStatement(
   after: unknown,
   /** Record only if the immediately preceding statement in the batch changed a row. */
   onlyIfPreviousChanged = false,
+  /** Why it was changed (required for edits and cancellations of money records). */
+  reason: string | null = null,
 ): D1PreparedStatement {
   const rowExpr = rowId === "last_insert" ? "last_insert_rowid()" : "?";
   const binds: unknown[] = [user.id, user.email, action, table];
@@ -18,10 +20,11 @@ export function auditStatement(
   binds.push(
     before === undefined ? null : JSON.stringify(before),
     after === undefined ? null : JSON.stringify(after),
+    reason,
   );
-  const columns = "user_id, user_email, action, table_name, row_id, before_json, after_json";
+  const columns = "user_id, user_email, action, table_name, row_id, before_json, after_json, reason";
   const sql = onlyIfPreviousChanged
-    ? `INSERT INTO audit_log (${columns}) SELECT ?, ?, ?, ?, ${rowExpr}, ?, ? WHERE changes() > 0`
-    : `INSERT INTO audit_log (${columns}) VALUES (?, ?, ?, ?, ${rowExpr}, ?, ?)`;
+    ? `INSERT INTO audit_log (${columns}) SELECT ?, ?, ?, ?, ${rowExpr}, ?, ?, ? WHERE changes() > 0`
+    : `INSERT INTO audit_log (${columns}) VALUES (?, ?, ?, ?, ${rowExpr}, ?, ?, ?)`;
   return db.prepare(sql).bind(...binds);
 }

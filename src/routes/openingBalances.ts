@@ -85,7 +85,7 @@ openingBalanceRoutes.post("/:id{[0-9]+}/void", async (c) => {
     auditStatement(c.env.DB, c.get("user"), "void", "opening_balances", id, before, {
       status: "void",
       void_reason: body.reason,
-    }, true),
+    }, true, body.reason),
   ]);
   if (updated!.meta.changes === 0) {
     throw new HTTPException(409, { message: "이미 취소된 항목입니다." });

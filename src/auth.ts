@@ -88,6 +88,12 @@ const isRegistryPath = (path: string) => path === "/api/registry" || path.starts
  * The 교적부 (birth dates, families, attendance history, notes) is the pastor's. Finance editors
  * cannot read it either; they get only what offering entry needs from GET /api/members.
  */
+/** Reports, the change log and settings are the pastor's view of the books. */
+export const pastorOnly: MiddlewareHandler<AppEnv> = async (c, next) => {
+  if (!c.get("user").registry_admin) return c.json({ error: "담임목사만 볼 수 있습니다." }, 403);
+  await next();
+};
+
 export const guardRegistryReads: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (isRegistryPath(c.req.path) && !c.get("user").registry_admin) {
     return c.json({ error: "교적부는 교적부 관리 권한이 있는 분만 볼 수 있습니다." }, 403);
@@ -95,8 +101,8 @@ export const guardRegistryReads: MiddlewareHandler<AppEnv> = async (c, next) => 
   await next();
 };
 
-/** Lists everyone picks from (offering types, departments, expense categories). */
-const LIST_PATHS = ["/api/fund-types", "/api/departments", "/api/expense-categories"];
+/** Lists everyone picks from (offering types, departments, expense categories), and the opening balances. */
+const LIST_PATHS = ["/api/fund-types", "/api/departments", "/api/expense-categories", "/api/opening-balances"];
 
 /**
  * The pastor (registry_admin) keeps the members and the lists everyone picks from; finance

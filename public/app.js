@@ -139,7 +139,7 @@ const isEditor = () => state.me?.role === "editor";
 
 function currentTab() {
   const t = location.hash.slice(1).split("/")[0];
-  return t in routes ? t : isEditor() ? "entry" : "offerings";
+  return t in routes ? t : "offerings";
 }
 /**
  * Every screen render takes a ticket; only the newest one may draw. A slow, older render (e.g. the
@@ -197,8 +197,8 @@ function resolveGiver(text, choices) {
 
 // ---------- 헌금 입력 ----------
 
-function lineEditor(onChange, choices) {
-  const line = { method: "cash" };
+function lineEditor(onChange, choices, method) {
+  const line = { method };
   const fund = h(
     "select",
     { "aria-label": "헌금 종류", onchange: onChange },
@@ -222,16 +222,6 @@ function lineEditor(onChange, choices) {
       visitorName.focus();
     }
   };
-  const cashBtn = h("button", { type: "button", class: "on" }, "현금");
-  const onlineBtn = h("button", { type: "button" }, "온라인");
-  const setMethod = (m) => {
-    line.method = m;
-    cashBtn.classList.toggle("on", m === "cash");
-    onlineBtn.classList.toggle("on", m === "online");
-    onChange();
-  };
-  cashBtn.onclick = () => setMethod("cash");
-  onlineBtn.onclick = () => setMethod("online");
 
   const removeBtn = h("button", { type: "button", class: "danger small" }, "삭제");
   const el = h(
@@ -242,7 +232,7 @@ function lineEditor(onChange, choices) {
       "div",
       { class: "grid" },
       h("div", { class: "row" }, h("div", {}, h("label", {}, "종류"), fund), h("div", {}, h("label", {}, "금액 ($)"), amount)),
-      h("div", { class: "row" }, h("div", {}, h("label", {}, "방식"), h("div", { class: "seg" }, cashBtn, onlineBtn)), h("div", {}, h("label", {}, "성도"), member)),
+      h("div", {}, h("label", {}, "성도"), member),
       h("label", { class: "check" }, visitor, " 교인이 아닌 방문자"),
       visitorBox,
       note,
@@ -275,46 +265,61 @@ function lineEditor(onChange, choices) {
   return line;
 }
 
-/** keepDate: after a save, stay on the same date so a second batch for that day isn't misdated. */
-async function renderEntry(keepDate) {
+const METHOD_LABEL = { cash: "현금", online: "온라인" };
+
+/** 헌금 tab: 현금 입력 · 온라인 입력 (finance editors) · 헌금 내역. */
+const offeringSeg = (active) =>
+  h("div", { class: "seg mt", role: "tablist" },
+    ...[["cash", "현금 입력"], ["online", "온라인 입력"], ["list", "헌금 내역"]]
+      .filter(([k]) => k === "list" || isEditor())
+      .map(([k, label]) => h("button", { type: "button", class: active === k ? "on" : "", onclick: () => { location.hash = `#offerings/${k}`; } }, label)));
+
+async function renderOfferingsTab() {
+  const view = location.hash.split("/")[1] || (isEditor() ? "cash" : "list");
+  if ((view === "cash" || view === "online") && isEditor()) return renderEntry(view);
+  return renderOfferings();
+}
+
+/**
+ * Cash is counted after the service; online gifts are entered from the bank statement. Each has its
+ * own form, so every line in it has the same method.
+ * keepDate: after a save, stay on the same date so a second batch for that day isn't misdated.
+ */
+async function renderEntry(method, keepDate) {
   const ticket = newTicket();
-  if (!isEditor()) {
-    paint(ticket, h("h2", {}, "헌금 입력"), h("p", { class: "notice" }, "열람 권한으로 로그인되어 있어 입력할 수 없습니다. '헌금 내역'에서 확인하세요."));
-    return;
-  }
+  const head = [h("h2", {}, "헌금"), offeringSeg(method)];
   await Promise.all([loadFunds(), loadMembers()]);
   if (!state.funds.length) {
-    paint(ticket, h("h2", {}, "헌금 입력"), h("p", { class: "notice" }, "설정에서 헌금 종류를 먼저 추가하세요."));
+    paint(ticket, ...head, h("p", { class: "notice mt" }, "설정에서 헌금 종류를 먼저 추가하세요."));
     return;
   }
   const lines = [];
-  const date = h("input", { type: "date", value: keepDate || lastSunday(), "aria-label": "날짜" });
+  const date = h("input", { type: "date", value: keepDate || (method === "cash" ? lastSunday() : hobartToday()), "aria-label": "날짜" });
   // Same key on every retry of this form, so a resend after a dropped connection is not saved twice.
   // Same key for resends of the same form (a resend after a dropped reply is recognised and not saved
   // twice); a new key as soon as the form differs from what was last sent.
   let clientKey = crypto.randomUUID();
   let sentSig = null;
   const list = h("div");
-  const totalCash = h("b", {}, money(0));
-  const totalOnline = h("b", {}, money(0));
   const totalAll = h("b", {}, money(0));
+  const totalCount = h("b", {}, "0");
   const recalc = () => {
-    let cash = 0, online = 0;
+    let sum = 0, n = 0;
     for (const l of lines) {
       const c = l.cents();
-      if (c === null) continue;
-      if (l.method === "cash") cash += c; else online += c;
+      if (c === null || c <= 0) continue;
+      sum += c;
+      n++;
     }
-    totalCash.textContent = money(cash);
-    totalOnline.textContent = money(online);
-    totalAll.textContent = money(cash + online);
+    totalAll.textContent = money(sum);
+    totalCount.textContent = String(n);
   };
   const choices = memberChoices();
   const giverList = h("datalist", { id: "giver-list" }, choices.map((c) => h("option", { value: c.label })));
   const visitorFromList = h("datalist", { id: "visitor-from-list" },
     ["론세스턴", "데본포트", "버니", "멜버른", "시드니", "브리즈번", "애들레이드", "퍼스", "캔버라", "뉴질랜드", "한국", "미국"].map((v) => h("option", { value: v })));
   const addLine = () => {
-    const l = lineEditor(recalc, choices);
+    const l = lineEditor(recalc, choices, method);
     l.removeBtn.onclick = () => {
       if (lines.length === 1) return;
       lines.splice(lines.indexOf(l), 1);
@@ -350,7 +355,7 @@ async function renderEntry(keepDate) {
       const warn = anonymous.length
         ? `⚠️ ${anonymous.map((i) => `${i + 1}번째`).join(", ")} 줄은 성도 이름이 없어 무기명으로 저장됩니다.\n(이름을 넣으려면 '취소')\n\n`
         : "";
-      if (!(await ask(`${warn}${date.value} 헌금 ${entries.length}건, 합계 ${money(total)}을 저장할까요?`, { okText: "저장" }))) {
+      if (!(await ask(`${warn}${date.value} ${METHOD_LABEL[method]} 헌금 ${entries.length}건, 합계 ${money(total)}을 저장할까요?`, { okText: "저장" }))) {
         if (anonymous.length) lines[anonymous[0]].focusGiver();
         return;
       }
@@ -363,24 +368,23 @@ async function renderEntry(keepDate) {
       if (saved.length !== entries.length || savedTotal !== total) {
         await ask(`이 입력은 앞서 저장된 내용으로 이미 처리되어 있었습니다.\n저장된 것: ${saved.length}건, ${money(savedTotal)}\n'헌금 내역'에서 확인하고, 필요하면 바로잡으세요.`, { okText: "확인", cancelText: "닫기" });
       }
-      toast(`${saved[0]?.offering_date ?? date.value} 헌금 저장: ${saved.length}건, ${money(savedTotal)}`);
-      renderEntry(date.value);
+      toast(`${saved[0]?.offering_date ?? date.value} ${METHOD_LABEL[method]} 헌금 저장: ${saved.length}건, ${money(savedTotal)}`);
+      renderEntry(method, date.value);
     });
 
-  paint(ticket, 
-    h("h2", {}, "헌금 입력"),
+  paint(ticket,
+    ...head,
     giverList,
     visitorFromList,
-    h("div", { class: "card" }, h("label", {}, "날짜"), date),
+    h("div", { class: "card mt" }, h("label", {}, method === "cash" ? "날짜 (헌금을 드린 주일)" : "날짜 (입금된 날)"), date),
     list,
     h("button", { type: "button", class: "secondary", onclick: () => addLine().focus() }, "+ 줄 추가"),
     h(
       "div",
       { class: "card mt" },
       h("div", { class: "totals" },
-        h("div", { class: "stat" }, totalCash, h("span", {}, "현금")),
-        h("div", { class: "stat" }, totalOnline, h("span", {}, "온라인")),
-        h("div", { class: "stat" }, totalAll, h("span", {}, "합계"))),
+        h("div", { class: "stat" }, totalCount, h("span", {}, "건수")),
+        h("div", { class: "stat" }, totalAll, h("span", {}, `${METHOD_LABEL[method]} 합계`))),
       h("div", { class: "mt" }, save),
     ),
   );
@@ -457,9 +461,10 @@ async function renderOfferings() {
   const reload = () => act(null, load);
   for (const el of [from, to, fund, showVoid]) el.addEventListener("change", reload);
 
-  paint(ticket, 
-    h("h2", {}, "헌금 내역"),
-    h("div", { class: "card" },
+  paint(ticket,
+    h("h2", {}, "헌금"),
+    offeringSeg("list"),
+    h("div", { class: "card mt" },
       h("div", { class: "row" }, h("div", {}, h("label", {}, "시작일"), from), h("div", {}, h("label", {}, "종료일"), to)),
       h("div", { class: "row mt" }, h("div", {}, h("label", {}, "종류"), fund),
         h("label", { class: "shrink", style: "display:flex;gap:6px;align-items:center;margin:0" }, showVoid, "취소된 항목 보기"))),
@@ -582,10 +587,10 @@ async function remindDue() {
 
 async function renderExpenses() {
   const ticket = newTicket();
-  const view = location.hash.split("/")[1] || "list"; // list | new | fixed
+  const view = location.hash.split("/")[1] || (isEditor() ? "new" : "list"); // new | list | fixed
   const [depts, cats] = await Promise.all([api("GET", "/api/departments"), api("GET", "/api/expense-categories")]);
   const seg = h("div", { class: "seg mt", role: "tablist" },
-    ...[["list", "지출 내역"], ["new", "지출 입력"], ["fixed", "고정 지출"]]
+    ...[["new", "지출 입력"], ["list", "지출 내역"], ["fixed", "고정 지출"]]
       .filter(([k]) => k === "list" || isEditor())
       .map(([k, label]) => h("button", { type: "button", class: view === k ? "on" : "", onclick: () => { location.hash = `#expenses/${k}`; } }, label)));
   const body =
@@ -664,6 +669,7 @@ async function editExpense(btn, e, depts, cats, after) {
   };
   const dept = sel("부서", depts, e.department_id), cat = sel("지출 항목", cats, e.category_id);
   const note = h("input", { value: e.note ?? "", maxlength: 300, "aria-label": "메모" });
+  const why = h("input", { maxlength: 300, placeholder: "예: 영수증 금액 확인, 부서 잘못 고름", "aria-label": "고치는 이유" });
   const close = () => { dlg.close(); dlg.remove(); };
   dlg.addEventListener("cancel", (ev) => { ev.preventDefault(); close(); });
   dlg.addEventListener("keydown", (ev) => { if (ev.key === "Enter" && !ev.isComposing && ev.target.tagName === "INPUT") save.click(); });
@@ -682,7 +688,11 @@ async function editExpense(btn, e, depts, cats, after) {
       if (c !== e.category_id) body.category_id = c;
       if (note.value.trim() !== (e.note ?? "")) body.note = note.value;
       if (!Object.keys(body).length) return close();
-      await api("PATCH", `/api/expenses/${e.id}`, body);
+      if (!why.value.trim()) {
+        why.focus();
+        throw new Error("고치는 이유를 적어 주세요. 변경 기록에 함께 남습니다.");
+      }
+      await api("PATCH", `/api/expenses/${e.id}`, { ...body, reason: why.value });
       close();
       toast("지출을 고쳤습니다.");
       await after();
@@ -694,8 +704,9 @@ async function editExpense(btn, e, depts, cats, after) {
       h("div", {}, h("label", {}, "지급처 / 내용"), vendor),
       h("div", { class: "row" }, h("div", {}, h("label", {}, "계정"), account), h("div", {}, h("label", {}, "부서"), dept)),
       h("div", { class: "row" }, h("div", {}, h("label", {}, "지출 항목"), cat)),
-      h("div", {}, h("label", {}, "메모"), note)),
-    h("p", { class: "muted mt" }, "고친 내용은 '기록' 탭에 이전 값과 함께 남습니다."),
+      h("div", {}, h("label", {}, "메모"), note),
+      h("div", {}, h("label", {}, "고치는 이유 (필수)"), why)),
+    h("p", { class: "muted mt" }, "고친 내용은 이유와 함께 '보고·기록 → 변경 기록'에 이전 값과 함께 남습니다."),
     h("div", { class: "row mt" }, h("button", { type: "button", class: "secondary", onclick: close }, "닫기"), save));
   document.body.append(dlg);
   dlg.showModal();
@@ -1374,7 +1385,7 @@ function openingBalanceCard() {
             h("div", { class: "head" }, h("b", {}, label), h("span", {}, `${cur.as_of_date} 기준`)),
             h("div", { class: "row" },
               h("div", {}, h("b", { style: "font-size:18px" }, money(cur.amount_cents)), cur.note ? h("div", { class: "muted" }, cur.note) : null),
-              h("div", { class: "shrink editor-only" }, h("button", { type: "button", class: "danger small", onclick: async (e) => {
+              h("div", { class: "shrink registry-only" }, h("button", { type: "button", class: "danger small", onclick: async (e) => {
                 const btn = e.currentTarget;
                 const reason = await ask(`${label} 시작 잔액 ${money(cur.amount_cents)}을 취소합니다. 사유를 입력하세요.`, { input: "", okText: "취소 처리", cancelText: "닫기", required: true });
                 if (reason === null) return;
@@ -1396,7 +1407,7 @@ function openingBalanceCard() {
           });
         return h("div", { class: "line" },
           h("div", { class: "head" }, h("b", {}, label), h("span", {}, "미입력")),
-          h("div", { class: "grid editor-only" },
+          h("div", { class: "grid registry-only" },
             h("div", { class: "row" }, h("div", {}, h("label", {}, "기준일"), date), h("div", {}, h("label", {}, "금액 ($)"), amount)),
             note, save));
       }),
@@ -1409,8 +1420,16 @@ function openingBalanceCard() {
   return { card, load };
 }
 
+/** 교인 · 설정 · 보고·기록 are the pastor's (the server refuses the data to anyone else as well). */
+function pastorOnlyScreen(ticket, title) {
+  if (isRegistryAdmin()) return false;
+  paint(ticket, h("h2", {}, title), h("p", { class: "notice" }, "담임목사만 볼 수 있는 화면입니다."));
+  return true;
+}
+
 async function renderSettings() {
   const ticket = newTicket();
+  if (pastorOnlyScreen(ticket, "설정")) return;
   const cards = [
     openingBalanceCard(),
     listCard("헌금 종류", "/api/fund-types"),
@@ -1437,50 +1456,87 @@ async function renderSettings() {
 // ---------- 기록 ----------
 
 const TABLE_NAMES = {
-  fund_types: "헌금 종류", departments: "부서", expense_categories: "지출 항목",
-  expenses: "지출", recurring_expenses: "고정 지출",
-  opening_balances: "시작 잔액", members: "교적부", offerings: "헌금",
-  titles: "직분 목록", member_titles: "직분", member_status_events: "출석 상태",
+  offerings: "헌금", expenses: "지출", expense_attachments: "영수증 사진", recurring_expenses: "고정 지출",
+  opening_balances: "시작 잔액", fund_types: "헌금 종류", departments: "부서", expense_categories: "지출 항목",
 };
 const ACTION_NAMES = { create: "추가", update: "수정", void: "취소" };
+const FIELD_LABELS = {
+  expense_date: "날짜", offering_date: "날짜", vendor: "지급처", total_cents: "금액", amount_cents: "금액", gst_cents: "GST",
+  account: "계정", department_id: "부서", category_id: "지출 항목", note: "메모", name: "이름", is_active: "목록",
+};
+const ACCOUNT_LABEL = { cash: "현금", bank: "은행" };
 
-function describe(entry) {
-  const a = entry.after ?? {};
-  const b = entry.before ?? {};
-  const parts = [];
-  if (a.name) parts.push(b.name && b.name !== a.name ? `${b.name} → ${a.name}` : a.name);
-  if (a.amount_cents !== undefined) parts.push(money(a.amount_cents));
-  if (entry.action === "void") parts.push(b.amount_cents !== undefined ? money(b.amount_cents) : "", `사유: ${a.void_reason ?? ""}`);
-  if (a.is_active !== undefined && b.is_active !== undefined && a.is_active !== b.is_active) parts.push(a.is_active ? "다시 사용" : "사용 중지");
-  if (a.offering_date) parts.push(a.offering_date);
-  if (a.vendor && !a.name) parts.push(a.vendor);
-  if (a.total_cents !== undefined) parts.push(money(a.total_cents));
-  if (a.expense_date) parts.push(a.expense_date);
-  if (a.status === "confirmed" && b.status === "planned") parts.push("지급 완료");
-  if (entry.action === "void" && b.total_cents !== undefined) parts.push(money(b.total_cents));
-  if (a.title_name) parts.push(`${a.title_name} ${a.start_date ?? ""}~${a.end_date ?? ""}`);
-  if (a.status_code) parts.push(`${STATUS_LABELS[a.status_code] ?? a.status_code} ${a.event_date ?? ""}`);
-  return parts.filter(Boolean).join(" · ");
+/**
+ * One line of the change log in plain words: what record, what changed (before → after), and why.
+ * `names` turns department / category / offering-type ids into their names.
+ */
+function auditEntry(r, names) {
+  const a = r.after ?? {}, b = r.before ?? {};
+  const v = { ...b, ...a };
+  const fmt = (k, x) => {
+    if (x === null || x === undefined || x === "") return "없음";
+    if (k.endsWith("_cents")) return money(x);
+    if (k === "account") return ACCOUNT_LABEL[x] ?? x;
+    if (k === "department_id") return names.departments.get(x) ?? `#${x}`;
+    if (k === "category_id") return names.categories.get(x) ?? `#${x}`;
+    if (k === "is_active") return x ? "사용" : "뺌";
+    return String(x);
+  };
+  let what = "";
+  switch (r.table_name) {
+    case "offerings":
+      what = [v.offering_date, b.fund_type_name ?? names.funds.get(v.fund_type_id), v.amount_cents !== undefined ? money(v.amount_cents) : "", METHOD_LABEL[v.method]].filter(Boolean).join(" ");
+      break;
+    case "expenses":
+      what = [v.expense_date, v.vendor, v.total_cents !== undefined ? money(v.total_cents) : ""].filter(Boolean).join(" ");
+      break;
+    case "expense_attachments":
+      what = `지출 #${v.expense_id ?? ""}`;
+      break;
+    case "opening_balances":
+      what = [ACCOUNT_LABEL[v.account], v.as_of_date, v.amount_cents !== undefined ? money(v.amount_cents) : ""].filter(Boolean).join(" ");
+      break;
+    default:
+      what = v.name ?? "";
+  }
+  let action = ACTION_NAMES[r.action] ?? r.action;
+  if (r.action === "update" && b.status === "planned" && a.status === "confirmed") action = "지급";
+  const changes = r.action === "update"
+    ? Object.keys(FIELD_LABELS).filter((k) => k in a && k in b && a[k] !== b[k]).map((k) => `${FIELD_LABELS[k]}: ${fmt(k, b[k])} → ${fmt(k, a[k])}`)
+    : [];
+  const why = r.reason ?? (r.action === "void" ? a.void_reason : null);
+  return h("li", {},
+    h("div", { class: "grow" },
+      h("div", {}, h("span", { class: "tag" }, TABLE_NAMES[r.table_name] ?? r.table_name), " ", h("b", {}, action), " ", what),
+      changes.length ? h("div", { class: "change" }, changes.join(" · ")) : null,
+      why ? h("div", { class: "why" }, `사유: ${why}`) : null,
+      h("div", { class: "muted" }, `${new Date(r.at).toLocaleString("ko-KR")} · ${r.user_name ?? r.user_email}`)));
 }
 
 async function renderAudit() {
   const ticket = newTicket();
+  if (pastorOnlyScreen(ticket, "보고·기록")) return;
   const list = h("ul", { class: "list" });
   const more = h("button", { type: "button", class: "secondary mt" }, "더 보기");
+  const [funds, depts, cats] = await Promise.all([
+    api("GET", "/api/fund-types?include_inactive=1"),
+    api("GET", "/api/departments?include_inactive=1"),
+    api("GET", "/api/expense-categories?include_inactive=1"),
+  ]);
+  const byId = (rows) => new Map(rows.map((x) => [x.id, x.name]));
+  const names = { funds: byId(funds), departments: byId(depts), categories: byId(cats) };
   let lastId = 0;
   const load = async () => {
     const rows = await api("GET", `/api/audit-log?limit=50${lastId ? `&before_id=${lastId}` : ""}`);
     if (!rows.length && !lastId) list.append(h("li", { class: "muted" }, "기록이 없습니다."));
-    for (const r of rows) {
-      list.append(h("li", {}, h("div", { class: "grow" },
-        h("div", {}, h("span", { class: "tag" }, TABLE_NAMES[r.table_name] ?? r.table_name), " ", h("b", {}, ACTION_NAMES[r.action] ?? r.action), " ", describe(r)),
-        h("div", { class: "muted" }, `${new Date(r.at).toLocaleString("ko-KR")} · ${r.user_email}`))));
-    }
+    for (const r of rows) list.append(auditEntry(r, names));
     if (rows.length) lastId = rows[rows.length - 1].id;
     more.hidden = rows.length < 50;
   };
   more.onclick = () => act(more, load);
-  paint(ticket, h("h2", {}, "보고·기록"), reportSeg("audit"), h("p", { class: "muted mt" }, "누가, 언제, 무엇을 바꿨는지 모두 남습니다. 지울 수 없습니다."), h("div", { class: "card" }, list), more);
+  paint(ticket, h("h2", {}, "보고·기록"), reportSeg("audit"),
+    h("p", { class: "muted mt" }, "헌금·지출과 그 설정이 언제, 누구에 의해, 왜 바뀌었는지 남습니다. 고치거나 취소할 때는 사유를 꼭 적습니다. 이 기록은 지울 수 없습니다."),
+    h("div", { class: "card" }, list), more);
   await act(null, load);
 }
 
@@ -1505,6 +1561,7 @@ function fiscalRange(startMonth, fyStartYear, part) {
 
 async function renderReports() {
   const ticket = newTicket();
+  if (pastorOnlyScreen(ticket, "보고·기록")) return;
   const churchStart = Number(state.settings.church_fiscal_year_start_month || 1);
   const auStart = Number(state.settings.au_fiscal_year_start_month || 7);
   const saved = (() => { try { return JSON.parse(localStorage.getItem("report-period") || "{}"); } catch { return {}; } })();
@@ -1642,12 +1699,12 @@ async function renderReports() {
 
 // ---------- routing ----------
 
-const routes = { entry: renderEntry, offerings: renderOfferings, expenses: renderExpenses, registry: renderRegistry, settings: renderSettings, reports: renderReports, audit: renderAudit };
-const roleText = () => `${state.me.name} · ${isEditor() ? "재정 기록" : "재정 열람"}${isRegistryAdmin() ? " · 교적부 관리" : ""}`;
+const routes = { entry: () => { location.replace("#offerings/cash"); }, offerings: renderOfferingsTab, expenses: renderExpenses, registry: renderRegistry, settings: renderSettings, reports: renderReports, audit: renderAudit };
+const roleText = () => `${state.me.name} · ${isEditor() ? "재정 기록" : "재정 열람"}${isRegistryAdmin() ? " · 관리자" : ""}`;
 
 async function route() {
   const tab = currentTab();
-  const tabOf = tab === "audit" ? "reports" : tab; // 변경 기록 lives under the 보고·기록 tab
+  const tabOf = tab === "audit" ? "reports" : tab === "entry" ? "offerings" : tab; // 변경 기록 lives under 보고·기록
   for (const a of document.querySelectorAll(".tabs a")) a.classList.toggle("on", a.dataset.tab === tabOf);
   view.replaceChildren(h("p", { class: "muted" }, "불러오는 중…"));
   const ticketBefore = renderTicket;
@@ -1667,7 +1724,8 @@ async function start() {
     return;
   }
   document.body.classList.toggle("viewer", !isEditor());
-  document.querySelector('.tabs a[data-tab="entry"]').hidden = !isEditor(); // nothing to do there for a viewer
+  // 교인 · 설정 · 보고·기록 are the pastor's; finance editors work in 헌금 and 지출.
+  for (const tab of ["registry", "settings", "reports"]) document.querySelector(`.tabs a[data-tab="${tab}"]`).hidden = !isRegistryAdmin();
   document.body.classList.toggle("no-registry", !isRegistryAdmin());
   document.querySelector('.tabs a[data-tab="registry"]').hidden = !isRegistryAdmin(); // pastor only
   document.getElementById("church-name").textContent = state.settings.church_name || "교회 회계";

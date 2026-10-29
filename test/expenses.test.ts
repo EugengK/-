@@ -203,16 +203,20 @@ describe("weekly stipend paid monthly, and editing expenses", () => {
 
   it("edits a paid expense; audited; void rows cannot be edited; viewer cannot", async () => {
     const e = await json(await call("POST", "/api/expenses", { as: EDITOR, body: { expense_date: "2026-11-01", vendor: "Coles", total_cents: 4550, account: "cash" } }));
-    const r = await call("PATCH", `/api/expenses/${e.id}`, { as: EDITOR2, body: { total_cents: 4650, vendor: "Coles Hobart", note: "간식" } });
+    // a reason is required and kept with the change
+    expect((await call("PATCH", `/api/expenses/${e.id}`, { as: EDITOR2, body: { total_cents: 4650 } })).status).toBe(400);
+    expect((await call("PATCH", `/api/expenses/${e.id}`, { as: EDITOR2, body: { total_cents: 4650, reason: "  " } })).status).toBe(400);
+    const r = await call("PATCH", `/api/expenses/${e.id}`, { as: EDITOR2, body: { total_cents: 4650, vendor: "Coles Hobart", note: "간식", reason: "영수증 금액 확인" } });
     expect(r.status).toBe(200);
+    expect(await count("SELECT COUNT(*) AS n FROM audit_log WHERE table_name = 'expenses' AND action = 'update' AND reason = '영수증 금액 확인'")).toBe(1);
     const after = await db.prepare("SELECT vendor, total_cents, note FROM expenses WHERE id = ?").bind(e.id).first();
     expect(after).toEqual({ vendor: "Coles Hobart", total_cents: 4650, note: "간식" });
     expect(await count("SELECT COUNT(*) AS n FROM audit_log WHERE table_name = 'expenses' AND action = 'update' AND user_email = ?", EDITOR2)).toBe(1);
-    expect((await call("PATCH", `/api/expenses/${e.id}`, { as: PASTOR, body: { total_cents: 1 } })).status).toBe(403);
-    expect((await call("PATCH", `/api/expenses/${e.id}`, { as: EDITOR, body: { gst_cents: 999999 } })).status).toBe(400);
-    expect((await call("PATCH", `/api/expenses/${e.id}`, { as: EDITOR, body: {} })).status).toBe(400);
+    expect((await call("PATCH", `/api/expenses/${e.id}`, { as: PASTOR, body: { total_cents: 1, reason: "r" } })).status).toBe(403);
+    expect((await call("PATCH", `/api/expenses/${e.id}`, { as: EDITOR, body: { gst_cents: 999999, reason: "r" } })).status).toBe(400);
+    expect((await call("PATCH", `/api/expenses/${e.id}`, { as: EDITOR, body: { reason: "r" } })).status).toBe(400);
     await call("POST", `/api/expenses/${e.id}/void`, { as: EDITOR, body: { reason: "x" } });
-    expect((await call("PATCH", `/api/expenses/${e.id}`, { as: EDITOR, body: { total_cents: 1 } })).status).toBe(409);
+    expect((await call("PATCH", `/api/expenses/${e.id}`, { as: EDITOR, body: { total_cents: 1, reason: "r" } })).status).toBe(409);
   });
 });
 
@@ -285,7 +289,7 @@ describe("audit fixes: fixed costs and expenses", () => {
   it("pay below GST -> 400, not a server error; pay can set the actual pay date", async () => {
     await call("POST", "/api/recurring-expenses", { as: EDITOR, body: rent });
     const [item] = await due();
-    await call("PATCH", `/api/expenses/${item.id}`, { as: EDITOR, body: { gst_cents: 1000 } });
+    await call("PATCH", `/api/expenses/${item.id}`, { as: EDITOR, body: { gst_cents: 1000, reason: "GST 확인" } });
     expect((await call("POST", `/api/expenses/${item.id}/pay`, { as: EDITOR, body: { total_cents: 500 } })).status).toBe(400);
     const ok = await call("POST", `/api/expenses/${item.id}/pay`, { as: EDITOR, body: { expense_date: today } });
     expect(await json(ok)).toMatchObject({ status: "confirmed", expense_date: today });

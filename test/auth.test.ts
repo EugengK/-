@@ -86,8 +86,12 @@ describe("authentication and authorization", () => {
   it("lets a viewer read finance but not record it; the lists everyone picks from are the pastor's", async () => {
     expect((await call("GET", "/api/fund-types", { as: PASTOR })).status).toBe(200);
     expect((await call("GET", "/api/audit-log", { as: PASTOR })).status).toBe(200);
-    expect((await call("POST", "/api/opening-balances", { as: PASTOR, body: {} })).status).toBe(403);
     expect((await call("POST", "/api/offerings", { as: PASTOR, body: {} })).status).toBe(403);
+    expect((await call("POST", "/api/expenses", { as: PASTOR, body: {} })).status).toBe(403);
+    // reports, the change log and opening balances are the pastor's
+    expect((await call("GET", "/api/audit-log", { as: EDITOR })).status).toBe(403);
+    expect((await call("GET", "/api/reports/summary?from=2026-01-01&to=2026-12-31", { as: EDITOR })).status).toBe(403);
+    expect((await call("POST", "/api/opening-balances", { as: EDITOR, body: {} })).status).toBe(403);
     // finance editors pick from the lists but cannot change them
     for (const path of ["/api/fund-types", "/api/departments", "/api/expense-categories"]) {
       expect((await call("POST", path, { as: EDITOR, body: { name: "특별" } })).status).toBe(403);

@@ -36,12 +36,13 @@ describe("members", () => {
       expect((await call("GET", path, { as: EDITOR })).status).toBe(403);
       expect((await call("GET", path, { as: PASTOR })).status).toBe(200);
     }
-    const editorLog = await json(await call("GET", "/api/audit-log?limit=200", { as: EDITOR }));
-    expect(editorLog.some((r: any) => r.table_name === "members")).toBe(false);
+    // The change log is the pastor's and covers the books only: member-roster changes are not in it.
+    expect((await call("GET", "/api/audit-log?limit=200", { as: EDITOR })).status).toBe(403);
     const pastorLog = await json(await call("GET", "/api/audit-log?limit=200", { as: PASTOR }));
-    expect(pastorLog.some((r: any) => r.table_name === "members")).toBe(true);
+    expect(pastorLog.some((r: any) => r.table_name === "members")).toBe(false);
+    expect(await count("SELECT COUNT(*) AS n FROM audit_log WHERE table_name = 'members'")).toBeGreaterThan(0); // still kept
     // paging still works with the filter
-    expect((await call("GET", `/api/audit-log?limit=5&before_id=${pastorLog[0].id + 1}`, { as: EDITOR })).status).toBe(200);
+    expect((await call("GET", "/api/audit-log?limit=5&before_id=999999", { as: PASTOR })).status).toBe(200);
   });
 
   it("validates; only the registry admin may change people", async () => {
@@ -113,7 +114,7 @@ describe("offerings", () => {
     expect((await post([{ fund_type_id: 1, amount_cents: 100, method: "cash", visitor_name: "가".repeat(51) }])).status).toBe(400);
     expect(await count("SELECT COUNT(*) AS n FROM offerings")).toBe(2);
     // the change log keeps who/where
-    const log = await json(await call("GET", "/api/audit-log?limit=5", { as: EDITOR }));
+    const log = await json(await call("GET", "/api/audit-log?limit=5", { as: PASTOR }));
     expect(log.some((a: any) => a.after?.visitor_from === "시드니")).toBe(true);
   });
 
@@ -313,20 +314,14 @@ describe("who gave what: finance editors see only the last week; totals per pers
     const sum = await json(await call("GET", `/api/offerings/summary?${q}`, { as: EDITOR }));
     expect(sum.total_cents).toBe(31500); // church totals are not affected
 
-    // the change log doesn't give the giver away either
-    const log = await json(await call("GET", "/api/audit-log?limit=50", { as: EDITOR }));
-    const offeringRows = log.filter((a: any) => a.table_name === "offerings");
-    expect(offeringRows.length).toBeGreaterThan(0);
-    expect(offeringRows.every((a: any) => a.after.member_id === undefined && a.after.visitor_name === undefined)).toBe(true);
+    // the change log (pastor only) doesn't give the giver away either
+    expect((await call("GET", "/api/audit-log?limit=50", { as: EDITOR })).status).toBe(403);
     const pastorLog = await json(await call("GET", "/api/audit-log?limit=50", { as: PASTOR }));
     expect(pastorLog.some((a: any) => a.table_name === "offerings" && a.after.member_id === m.id)).toBe(true);
 
-    // CSV: rows and amounts, no names or IDs for editors
-    const csvText = async (as: string) => new TextDecoder().decode(await (await call("GET", `/api/reports/offerings.csv?${q}`, { as })).arrayBuffer());
-    const editorCsv = await csvText(EDITOR);
-    expect(editorCsv).not.toContain("김철수");
-    expect(editorCsv).not.toContain("홍길동");
-    expect(editorCsv).toContain(",교인,(목사님만 열람),,");
-    expect(await csvText(PASTOR)).toContain("김철수");
+    // CSV downloads are the pastor's (reports)
+    expect((await call("GET", `/api/reports/offerings.csv?${q}`, { as: EDITOR })).status).toBe(403);
+    const csvText = new TextDecoder().decode(await (await call("GET", `/api/reports/offerings.csv?${q}`, { as: PASTOR })).arrayBuffer());
+    expect(csvText).toContain("김철수");
   });
 });

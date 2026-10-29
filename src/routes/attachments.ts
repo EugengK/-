@@ -114,7 +114,7 @@ attachmentRoutes.post("/attachments/:id{[0-9]+}/void", async (c) => {
   if (!before) throw new HTTPException(404, { message: "찾을 수 없습니다." });
   const [u] = await db.batch([
     db.prepare("UPDATE expense_attachments SET status = 'void', void_reason = ? WHERE id = ? AND status = 'active'").bind(b.reason, id),
-    auditStatement(db, c.get("user"), "void", "expense_attachments", id, before, { status: "void", void_reason: b.reason }, true),
+    auditStatement(db, c.get("user"), "void", "expense_attachments", id, before, { status: "void", void_reason: b.reason }, true, b.reason),
   ]);
   if (u!.meta.changes === 0) throw new HTTPException(409, { message: "이미 지운 사진입니다." });
   return c.json({ ok: true });

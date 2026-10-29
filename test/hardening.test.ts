@@ -29,13 +29,13 @@ describe("concurrent edits", () => {
   it("logs exactly one void when two voids race", async () => {
     const row = await json(
       await call("POST", "/api/opening-balances", {
-        as: EDITOR,
+        as: PASTOR,
         body: { account: "cash", as_of_date: "2026-11-01", amount_cents: 1000 },
       }),
     );
     const [a, b] = await Promise.all([
-      call("POST", `/api/opening-balances/${row.id}/void`, { as: EDITOR, body: { reason: "A" } }),
-      call("POST", `/api/opening-balances/${row.id}/void`, { as: EDITOR2, body: { reason: "B" } }),
+      call("POST", `/api/opening-balances/${row.id}/void`, { as: PASTOR, body: { reason: "A" } }),
+      call("POST", `/api/opening-balances/${row.id}/void`, { as: PASTOR, body: { reason: "B" } }),
     ]);
     expect([a.status, b.status].sort()).toEqual([200, 409]);
     expect(await count("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'void'")).toBe(1);
@@ -68,14 +68,14 @@ describe("input hardening", () => {
 
   it("does not 500 on fractional or junk paging params", async () => {
     for (const q of ["limit=1.5", "limit=-3", "limit=1e9", "before_id=2.7", "before_id=NaN", "limit=0x10"]) {
-      expect((await call("GET", `/api/audit-log?${q}`, { as: EDITOR })).status).toBe(200);
+      expect((await call("GET", `/api/audit-log?${q}`, { as: PASTOR })).status).toBe(200);
     }
   });
 
   it("rejects out-of-range dates in the API and impossible dates in the database", async () => {
     for (const d of ["0000-01-01", "1999-12-31", "2101-01-01", "2026-13-45"]) {
       const res = await call("POST", "/api/opening-balances", {
-        as: EDITOR,
+        as: PASTOR,
         body: { account: "cash", as_of_date: d, amount_cents: 1 },
       });
       expect(res.status).toBe(400);

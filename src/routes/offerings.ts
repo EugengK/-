@@ -254,6 +254,7 @@ offeringRoutes.post("/:id{[0-9]+}/void", async (c) => {
       before,
       { status: "void", void_reason: body.reason },
       true,
+      body.reason,
     ),
   ]);
   if (updated!.meta.changes === 0) throw new HTTPException(409, { message: "이미 취소된 항목입니다." });

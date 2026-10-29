@@ -419,7 +419,7 @@ expenseRoutes.post("/:id{[0-9]+}/void", async (c) => {
   if (!before) throw new HTTPException(404, { message: "찾을 수 없습니다." });
   const [u] = await db.batch([
     db.prepare("UPDATE expenses SET status = 'void', void_reason = ? WHERE id = ? AND status != 'void'").bind(b.reason, id),
-    auditStatement(db, c.get("user"), "void", "expenses", id, before, { status: "void", void_reason: b.reason }, true),
+    auditStatement(db, c.get("user"), "void", "expenses", id, before, { status: "void", void_reason: b.reason }, true, b.reason),
   ]);
   if (u!.meta.changes === 0) throw new HTTPException(409, { message: "이미 취소된 항목입니다." });
   return c.json({ ok: true });
@@ -458,9 +458,11 @@ const expenseUpdate = z
     department_id: optionalId,
     category_id: optionalId,
     note: optionalText(300),
+    /** Why the paid record is being changed; kept in the change log. */
+    reason,
   })
   .strict()
-  .refine((v) => Object.keys(v).length > 0, "바꿀 내용을 입력하세요.");
+  .refine((v) => Object.keys(v).some((k) => k !== "reason"), "바꿀 내용을 입력하세요.");
 
 expenseRoutes.patch("/:id{[0-9]+}", async (c) => {
   const id = Number(c.req.param("id"));
@@ -489,7 +491,7 @@ expenseRoutes.patch("/:id{[0-9]+}", async (c) => {
         .bind(next.expense_date, next.vendor, next.total_cents, next.gst_cents, next.account, next.department_id, next.category_id, next.note,
           id, before.status, before.expense_date, before.vendor, before.total_cents, before.gst_cents, before.account,
           before.department_id, before.category_id, before.note),
-      auditStatement(db, c.get("user"), "update", "expenses", id, before, next, true),
+      auditStatement(db, c.get("user"), "update", "expenses", id, before, next, true, b.reason),
     ]);
     if (u!.meta.changes === 0) throw new HTTPException(409, { message: "다른 사람이 먼저 고쳤습니다. 새로고침 후 다시 시도하세요." });
   } catch (err) {

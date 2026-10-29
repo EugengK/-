@@ -108,3 +108,5 @@ button.pill-btn { min-height: 28px; min-width: 28px; padding: 0 4px; border: 0; 
 /* iOS Safari sizes date inputs by their content unless their native look is turned off. */
 input[type="date"] { -webkit-appearance: none; appearance: none; min-width: 0; display: block; text-align: left; }
 input[type="date"]::-webkit-date-and-time-value { text-align: left; }
+.list li .change { font-size: 14px; margin-top: 2px; }
+.list li .why { font-size: 14px; margin-top: 2px; color: var(--brand); }

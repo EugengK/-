@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { accessVerifier, authenticate, guardRegistryReads, guardWrites } from "./auth";
+import { accessVerifier, authenticate, guardRegistryReads, guardWrites, pastorOnly } from "./auth";
 import { expenseRoutes, recurringRoutes } from "./routes/expenses";
 import { lookupRoutes } from "./routes/lookups";
 import { attachmentRoutes } from "./routes/attachments";
@@ -35,6 +35,9 @@ export function createApp(verify: TokenVerifier = accessVerifier) {
   app.use("/api/*", authenticate(verify));
   app.use("/api/*", guardWrites);
   app.use("/api/*", guardRegistryReads);
+  app.use("/api/reports/*", pastorOnly);
+  app.use("/api/audit-log", pastorOnly);
+  app.use("/api/audit-log/*", pastorOnly);
 
   app.route("/api/me", meRoutes);
   app.route("/api/users", userRoutes);

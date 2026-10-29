@@ -7,7 +7,7 @@ describe("opening balances", () => {
   beforeEach(resetDb);
 
   it("creates a balance, lists it and audits it", async () => {
-    const res = await call("POST", "/api/opening-balances", { as: EDITOR, body: valid });
+    const res = await call("POST", "/api/opening-balances", { as: PASTOR, body: valid });
     expect(res.status).toBe(201);
     const row = await json(res);
     expect(row).toMatchObject({ account: "bank", amount_cents: 1234567, status: "active", note: "합병 시점 잔액" });
@@ -20,11 +20,11 @@ describe("opening balances", () => {
   });
 
   it("allows cash and bank once each, and refuses a second active balance", async () => {
-    expect((await call("POST", "/api/opening-balances", { as: EDITOR, body: valid })).status).toBe(201);
+    expect((await call("POST", "/api/opening-balances", { as: PASTOR, body: valid })).status).toBe(201);
     expect(
-      (await call("POST", "/api/opening-balances", { as: EDITOR, body: { ...valid, account: "cash", amount_cents: 50000 } })).status,
+      (await call("POST", "/api/opening-balances", { as: PASTOR, body: { ...valid, account: "cash", amount_cents: 50000 } })).status,
     ).toBe(201);
-    expect((await call("POST", "/api/opening-balances", { as: EDITOR, body: valid })).status).toBe(409);
+    expect((await call("POST", "/api/opening-balances", { as: PASTOR, body: valid })).status).toBe(409);
   });
 
   it("validates account, date, amount and unknown fields", async () => {
@@ -39,47 +39,48 @@ describe("opening balances", () => {
       { account: "bank" },
     ];
     for (const body of bad) {
-      expect((await call("POST", "/api/opening-balances", { as: EDITOR, body })).status).toBe(400);
+      expect((await call("POST", "/api/opening-balances", { as: PASTOR, body })).status).toBe(400);
     }
   });
 
   it("accepts a zero or negative balance (e.g. overdrawn account)", async () => {
-    expect((await call("POST", "/api/opening-balances", { as: EDITOR, body: { ...valid, amount_cents: 0 } })).status).toBe(201);
+    expect((await call("POST", "/api/opening-balances", { as: PASTOR, body: { ...valid, amount_cents: 0 } })).status).toBe(201);
     expect(
-      (await call("POST", "/api/opening-balances", { as: EDITOR, body: { ...valid, account: "cash", amount_cents: -1000 } })).status,
+      (await call("POST", "/api/opening-balances", { as: PASTOR, body: { ...valid, account: "cash", amount_cents: -1000 } })).status,
     ).toBe(201);
   });
 
   it("voids with a reason, then allows re-entering; voided rows are hidden by default", async () => {
-    const first = await json(await call("POST", "/api/opening-balances", { as: EDITOR, body: valid }));
-    expect((await call("POST", `/api/opening-balances/${first.id}/void`, { as: EDITOR2, body: {} })).status).toBe(400);
-    const voided = await call("POST", `/api/opening-balances/${first.id}/void`, { as: EDITOR2, body: { reason: "금액 오입력" } });
+    const first = await json(await call("POST", "/api/opening-balances", { as: PASTOR, body: valid }));
+    expect((await call("POST", `/api/opening-balances/${first.id}/void`, { as: PASTOR, body: {} })).status).toBe(400);
+    const voided = await call("POST", `/api/opening-balances/${first.id}/void`, { as: PASTOR, body: { reason: "금액 오입력" } });
     expect(voided.status).toBe(200);
     expect(await json(voided)).toMatchObject({ status: "void", void_reason: "금액 오입력" });
 
     expect(await json(await call("GET", "/api/opening-balances", { as: EDITOR }))).toHaveLength(0);
     expect(await json(await call("GET", "/api/opening-balances?include_void=1", { as: EDITOR }))).toHaveLength(1);
 
-    const again = await call("POST", "/api/opening-balances", { as: EDITOR, body: { ...valid, amount_cents: 1000000 } });
+    const again = await call("POST", "/api/opening-balances", { as: PASTOR, body: { ...valid, amount_cents: 1000000 } });
     expect(again.status).toBe(201);
 
-    const log = await json(await call("GET", "/api/audit-log?limit=3", { as: EDITOR }));
+    const log = await json(await call("GET", "/api/audit-log?limit=3", { as: PASTOR }));
     expect(log.map((l: { action: string }) => l.action)).toEqual(["create", "void", "create"]);
-    expect(log[1]).toMatchObject({ user_email: EDITOR2 });
+    expect(log[1]).toMatchObject({ user_email: PASTOR, user_name: "담임목사", reason: "금액 오입력" });
     expect(log[1].before).toMatchObject({ status: "active", amount_cents: 1234567 });
   });
 
   it("cannot void twice or void a missing row", async () => {
-    const row = await json(await call("POST", "/api/opening-balances", { as: EDITOR, body: valid }));
-    await call("POST", `/api/opening-balances/${row.id}/void`, { as: EDITOR, body: { reason: "x" } });
-    expect((await call("POST", `/api/opening-balances/${row.id}/void`, { as: EDITOR, body: { reason: "x" } })).status).toBe(409);
-    expect((await call("POST", "/api/opening-balances/99999/void", { as: EDITOR, body: { reason: "x" } })).status).toBe(404);
+    const row = await json(await call("POST", "/api/opening-balances", { as: PASTOR, body: valid }));
+    await call("POST", `/api/opening-balances/${row.id}/void`, { as: PASTOR, body: { reason: "x" } });
+    expect((await call("POST", `/api/opening-balances/${row.id}/void`, { as: PASTOR, body: { reason: "x" } })).status).toBe(409);
+    expect((await call("POST", "/api/opening-balances/99999/void", { as: PASTOR, body: { reason: "x" } })).status).toBe(404);
   });
 
   it("does not expose update or delete", async () => {
-    const row = await json(await call("POST", "/api/opening-balances", { as: EDITOR, body: valid }));
-    expect((await call("PATCH", `/api/opening-balances/${row.id}`, { as: EDITOR, body: { amount_cents: 1 } })).status).toBe(404);
-    expect((await call("DELETE", `/api/opening-balances/${row.id}`, { as: EDITOR })).status).toBe(404);
+    const row = await json(await call("POST", "/api/opening-balances", { as: PASTOR, body: valid }));
+    expect((await call("PATCH", `/api/opening-balances/${row.id}`, { as: PASTOR, body: { amount_cents: 1 } })).status).toBe(404);
+    expect((await call("DELETE", `/api/opening-balances/${row.id}`, { as: PASTOR })).status).toBe(404);
+    expect((await call("POST", "/api/opening-balances", { as: EDITOR, body: valid })).status).toBe(403); // the pastor sets them
   });
 });
 
