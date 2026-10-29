@@ -95,9 +95,15 @@ export const guardRegistryReads: MiddlewareHandler<AppEnv> = async (c, next) => 
   await next();
 };
 
-/** Registry (교적부) writes belong to the pastor; everything else is finance and belongs to editors. */
+/** Lists everyone picks from (offering types, departments, expense categories). */
+const LIST_PATHS = ["/api/fund-types", "/api/departments", "/api/expense-categories"];
+
+/**
+ * The pastor (registry_admin) keeps the members and the lists everyone picks from; finance
+ * editors record offerings and expenses.
+ */
 function mayWrite(user: AppUser, path: string): boolean {
-  if (isRegistryPath(path) || path.startsWith("/api/members")) {
+  if (isRegistryPath(path) || path.startsWith("/api/members") || LIST_PATHS.some((p) => path === p || path.startsWith(`${p}/`))) {
     return user.registry_admin;
   }
   return user.role === "editor";

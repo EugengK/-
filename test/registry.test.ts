@@ -29,18 +29,18 @@ async function newMember(name: string) {
 describe("titles (직분)", () => {
   beforeEach(resetDb);
 
-  it("seeds the eight titles; 서리집사 is a yearly appointment", async () => {
+  it("seeds the nine titles; 서리집사 is a yearly appointment", async () => {
     const t = await json(await call("GET", "/api/registry/titles", { as: PASTOR }));
-    expect(t.map((x: any) => x.name)).toEqual(["성도", "청년", "서리집사", "장립집사", "권사", "장로", "전도사", "강도사"]);
+    expect(t.map((x: any) => x.name)).toEqual(["성도", "청년", "서리집사", "장립집사", "권사", "장로", "전도사", "강도사", "목사"]);
     expect(t.find((x: any) => x.name === "서리집사").term_limited).toBe(true);
     expect(t.find((x: any) => x.name === "장로").term_limited).toBe(false);
   });
 
   it("only the pastor manages titles", async () => {
-    expect((await call("POST", "/api/registry/titles", { as: EDITOR, body: { name: "목사" } })).status).toBe(403);
-    const r = await call("POST", "/api/registry/titles", { as: PASTOR, body: { name: "목사" } });
+    expect((await call("POST", "/api/registry/titles", { as: EDITOR, body: { name: "사모" } })).status).toBe(403);
+    const r = await call("POST", "/api/registry/titles", { as: PASTOR, body: { name: "사모" } });
     expect(r.status).toBe(201);
-    expect((await call("POST", "/api/registry/titles", { as: PASTOR, body: { name: "목사" } })).status).toBe(409);
+    expect((await call("POST", "/api/registry/titles", { as: PASTOR, body: { name: "사모" } })).status).toBe(409);
     const id = (await json(r)).id;
     expect((await call("PATCH", `/api/registry/titles/${id}`, { as: PASTOR, body: { is_active: false } })).status).toBe(200);
   });
@@ -501,5 +501,36 @@ describe("church roster with 교인ID and 가정ID", () => {
     const m = await byName();
     expect(m["김채우"]).toMatchObject({ member_code: "P-A03", family_code: "F-A" });
     expect(Object.keys(m).filter((n) => n === "김채우")).toHaveLength(1);
+  });
+});
+
+describe("giving per member and the 목사 title", () => {
+  beforeEach(resetDb);
+
+  it("totals active offerings per member for a period; pastor only", async () => {
+    await call("POST", "/api/registry/import-roster", { as: PASTOR, body: { people: [
+      { member_code: "P-1", family_code: "F-1", name: "가목사", title: "담임목사" },
+      { member_code: "P-2", family_code: "F-1", name: "가사모" },
+    ] } });
+    const m = Object.fromEntries((await json(await call("GET", "/api/members", { as: PASTOR }))).map((x: any) => [x.name, x]));
+    expect(m["가목사"].current_title).toBe("목사"); // 담임목사 in the roster = 목사
+    const post = (entries: unknown[], date = "2026-03-01") => call("POST", "/api/offerings", { as: EDITOR, body: { offering_date: date, entries } });
+    await post([
+      { fund_type_id: 1, amount_cents: 1000, method: "cash", member_id: m["가목사"].id },
+      { fund_type_id: 2, amount_cents: 2500, method: "online", member_id: m["가목사"].id },
+      { fund_type_id: 1, amount_cents: 700, method: "cash", member_id: m["가사모"].id },
+      { fund_type_id: 1, amount_cents: 999, method: "cash" }, // anonymous: not counted
+      { fund_type_id: 1, amount_cents: 500, method: "cash", visitor_from: "시드니" }, // visitor: not counted
+    ]);
+    const [late] = await json(await post([{ fund_type_id: 1, amount_cents: 4000, method: "cash", member_id: m["가사모"].id }], "2027-01-02"));
+    const voided = (await json(await post([{ fund_type_id: 1, amount_cents: 300, method: "cash", member_id: m["가사모"].id }])))[0];
+    await call("POST", `/api/offerings/${voided.id}/void`, { as: EDITOR, body: { reason: "오입력" } });
+    expect(late.id).toBeGreaterThan(0);
+
+    const g = await json(await call("GET", "/api/registry/giving?from=2026-01-01&to=2026-12-31", { as: PASTOR }));
+    const by = Object.fromEntries(g.map((x: any) => [x.member_id, x.total_cents]));
+    expect(by).toEqual({ [m["가목사"].id]: 3500, [m["가사모"].id]: 700 });
+    expect((await call("GET", "/api/registry/giving?from=2026-01-01&to=2026-12-31", { as: EDITOR })).status).toBe(403);
+    expect((await call("GET", "/api/registry/giving?from=2026-12-31&to=2026-01-01", { as: PASTOR })).status).toBe(400);
   });
 });

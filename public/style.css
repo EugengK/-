@@ -1,3 +1,4 @@
+[hidden] { display: none !important; } /* layout classes such as .row must not un-hide */
 :root {
   --bg: #f5f6f8; --card: #fff; --text: #1d2330; --muted: #6b7280; --line: #e3e6eb;
   --brand: #1f4e79; --brand-soft: #e8f0f8; --danger: #b42318; --ok: #157347;
@@ -88,3 +89,14 @@ dialog.photos { width: min(560px, calc(100vw - 32px)); }
 .photo-list figure { margin: 0; }
 .photo-list img { width: 100%; border-radius: 8px; border: 1px solid var(--line); display: block; }
 .photo-list figcaption { margin-top: 4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.card-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.card-head h3 { margin: 0; }
+.pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.pill { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: #fbfcfd; font-size: 14px; line-height: 1.5; }
+.pill.off { color: var(--muted); text-decoration: line-through; background: #f3f4f6; }
+.pill .tag { font-size: 11px; padding: 0 6px; }
+button.pill-btn { min-height: 28px; min-width: 28px; padding: 0 4px; border: 0; background: transparent; color: var(--brand); font-size: 15px; }
+.family { border-top: 1px solid var(--line); padding: 8px 0; }
+.family-head { display: flex; align-items: baseline; gap: 8px; }
+.family-head .num { margin-left: auto; }
+.family .list { margin: 4px 0 0 12px; }

@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { SignJWT, generateKeyPair } from "jose";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/app";
-import { EDITOR, EDITOR2, call, db, json, resetDb } from "./helpers";
+import { EDITOR, EDITOR2, call, db, json, resetDb, PASTOR } from "./helpers";
 
 const count = async (sql: string, ...b: unknown[]) =>
   (await db.prepare(sql).bind(...b).first<{ n: number }>())!.n;
@@ -11,10 +11,10 @@ describe("concurrent edits", () => {
   beforeEach(resetDb);
 
   it("never loses an update or logs a change that was not applied (PATCH)", async () => {
-    const { id } = await json(await call("POST", "/api/departments", { as: EDITOR, body: { name: "Orig" } }));
+    const { id } = await json(await call("POST", "/api/departments", { as: PASTOR, body: { name: "Orig" } }));
     const [a, b] = await Promise.all([
-      call("PATCH", `/api/departments/${id}`, { as: EDITOR, body: { name: "Renamed" } }),
-      call("PATCH", `/api/departments/${id}`, { as: EDITOR2, body: { is_active: false } }),
+      call("PATCH", `/api/departments/${id}`, { as: PASTOR, body: { name: "Renamed" } }),
+      call("PATCH", `/api/departments/${id}`, { as: PASTOR, body: { is_active: false } }),
     ]);
     const ok = [a.status, b.status].filter((s) => s === 200).length;
     expect([a.status, b.status].every((s) => s === 200 || s === 409)).toBe(true);
@@ -45,11 +45,11 @@ describe("concurrent edits", () => {
   });
 
   it("a stale PATCH conflicts with 409 and writes no audit row", async () => {
-    const { id } = await json(await call("POST", "/api/departments", { as: EDITOR, body: { name: "S" } }));
+    const { id } = await json(await call("POST", "/api/departments", { as: PASTOR, body: { name: "S" } }));
     // Simulate another editor changing the row between our read and write.
     await db.prepare("UPDATE departments SET sort_order = 9 WHERE id = ?").bind(id).run();
     const before = await count("SELECT COUNT(*) AS n FROM audit_log");
-    const res = await call("PATCH", `/api/departments/${id}`, { as: EDITOR, body: { name: "T" } });
+    const res = await call("PATCH", `/api/departments/${id}`, { as: PASTOR, body: { name: "T" } });
     expect(res.status).toBe(200); // read happens inside the request, so it sees sort_order=9: not stale
     expect(await count("SELECT COUNT(*) AS n FROM audit_log")).toBe(before + 1);
   });
@@ -62,8 +62,8 @@ describe("input hardening", () => {
     const nfc = "친교부".normalize("NFC");
     const nfd = "친교부".normalize("NFD");
     expect(nfc).not.toBe(nfd);
-    expect((await call("POST", "/api/departments", { as: EDITOR, body: { name: nfc } })).status).toBe(201);
-    expect((await call("POST", "/api/departments", { as: EDITOR, body: { name: nfd } })).status).toBe(409);
+    expect((await call("POST", "/api/departments", { as: PASTOR, body: { name: nfc } })).status).toBe(201);
+    expect((await call("POST", "/api/departments", { as: PASTOR, body: { name: nfd } })).status).toBe(409);
   });
 
   it("does not 500 on fractional or junk paging params", async () => {
@@ -91,15 +91,15 @@ describe("input hardening", () => {
 
   it("requires an exact application/json media type and the same scheme+host in Origin", async () => {
     const body = { name: "ct" };
-    const jsonx = await call("POST", "/api/departments", { as: EDITOR, body, headers: { "Content-Type": "application/jsonx" } });
+    const jsonx = await call("POST", "/api/departments", { as: PASTOR, body, headers: { "Content-Type": "application/jsonx" } });
     expect(jsonx.status).toBe(415);
     const charset = await call("POST", "/api/departments", {
-      as: EDITOR,
+      as: PASTOR,
       body: { name: "ct2" },
       headers: { "Content-Type": "application/json; charset=utf-8" },
     });
     expect(charset.status).toBe(201);
-    const http = await call("POST", "/api/departments", { as: EDITOR, body, headers: { Origin: "http://finance.example.org" } });
+    const http = await call("POST", "/api/departments", { as: PASTOR, body, headers: { Origin: "http://finance.example.org" } });
     expect(http.status).toBe(403);
   });
 });

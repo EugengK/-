@@ -300,7 +300,7 @@ describe("audit fixes: fixed costs and expenses", () => {
   });
 
   it("department filter applies to the totals too", async () => {
-    const d = await json(await call("POST", "/api/departments", { as: EDITOR, body: { name: "교육부" } }));
+    const d = await json(await call("POST", "/api/departments", { as: PASTOR, body: { name: "교육부" } }));
     const post = (b: object) => call("POST", "/api/expenses", { as: EDITOR, body: { expense_date: "2026-11-01", vendor: "x", account: "cash", ...b } });
     await post({ total_cents: 1000, department_id: d.id });
     await post({ total_cents: 5000 });

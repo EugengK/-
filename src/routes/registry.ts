@@ -6,11 +6,27 @@ import { todayInHobart } from "../dates";
 import { CURRENT_STATUS, CURRENT_TITLE, SYNC_ACTIVE_SQL } from "../registrySql";
 import type { AppEnv } from "../types";
 import { applyPeople, applyRoster, firstTitleStatements, loadTitles, peopleSchema, rosterSchema } from "./sync";
-import { historicalDate, isUniqueViolation, name, optionalText, parseBody, pastDate, reason } from "../validation";
+import { historicalDate, isRealDate, isUniqueViolation, name, optionalText, parseBody, pastDate, reason } from "../validation";
 
 const STATUS_CODES = ["registered", "attending", "inactive", "left", "transferred", "returned", "deceased"] as const;
 
 export const registryRoutes = new Hono<AppEnv>();
+
+// ---------- 교인별 헌금 합계 ----------
+
+/** Active offerings per member for a period (visitors and anonymous gifts have no member). */
+registryRoutes.get("/giving", async (c) => {
+  const from = c.req.query("from"), to = c.req.query("to");
+  if (!from || !to || !isRealDate(from) || !isRealDate(to)) throw new HTTPException(400, { message: "from, to: YYYY-MM-DD" });
+  if (from > to) throw new HTTPException(400, { message: "시작일이 종료일보다 늦습니다." });
+  const { results } = await c.env.DB.prepare(
+    `SELECT member_id, SUM(amount_cents) AS total_cents, COUNT(*) AS count FROM offerings
+     WHERE status = 'active' AND member_id IS NOT NULL AND offering_date BETWEEN ? AND ? GROUP BY member_id`,
+  )
+    .bind(from, to)
+    .all();
+  return c.json(results);
+});
 
 // ---------- 직분 목록 ----------
 

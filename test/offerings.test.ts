@@ -118,7 +118,7 @@ describe("offerings", () => {
   });
 
   it("is all-or-nothing: one bad line writes nothing", async () => {
-    await call("PATCH", "/api/fund-types/5", { as: EDITOR, body: { is_active: false } });
+    await call("PATCH", "/api/fund-types/5", { as: PASTOR, body: { is_active: false } });
     const before = await count("SELECT COUNT(*) AS n FROM audit_log");
     for (const entries of [
       [{ fund_type_id: 1, amount_cents: 100, method: "cash" }, { fund_type_id: 5, amount_cents: 100, method: "cash" }],
@@ -271,7 +271,7 @@ describe("phase 2 review fixes", () => {
 
   it("summary filtered by fund type still counts a type that was later stopped", async () => {
     await call("POST", "/api/offerings", { as: EDITOR, body: { offering_date: "2026-11-01", entries: [{ ...line, fund_type_id: 5 }, line] } });
-    await call("PATCH", "/api/fund-types/5", { as: EDITOR, body: { is_active: false } });
+    await call("PATCH", "/api/fund-types/5", { as: PASTOR, body: { is_active: false } });
     const s = await json(await call("GET", "/api/offerings/summary?fund_type_id=5", { as: PASTOR }));
     expect(s.total_cents).toBe(1000);
     expect((await json(await call("GET", "/api/offerings/summary", { as: PASTOR }))).total_cents).toBe(2000);

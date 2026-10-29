@@ -1007,237 +1007,110 @@ function ageOf(birth) {
   const [ty, tm, td] = today.split("-").map(Number);
   return ty - y - (tm < m || (tm === m && td < d) ? 1 : 0);
 }
-const thisYear = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Hobart", year: "numeric" }).format(new Date());
 
+/**
+ * 교인 명부 (pastor only): who is in the church and what each person and each household (가정ID)
+ * gave in a church year. The fuller 교적부 (titles over time, attendance, member pages) is kept on
+ * the archive/registry-full branch.
+ */
 async function renderRegistry() {
   const ticket = newTicket();
   if (!isRegistryAdmin()) {
-    paint(ticket, h("h2", {}, "교적부"), h("p", { class: "notice" }, "교적부는 담임목사(교적부 관리 권한)만 볼 수 있습니다."));
+    paint(ticket, h("h2", {}, "교인 명부"), h("p", { class: "notice" }, "교인 명부는 담임목사(관리 권한)만 볼 수 있습니다."));
     return;
   }
-  const id = Number(location.hash.split("/")[1]);
-  if (id) return renderRegistryMember(ticket, id);
-
+  const start = Number(state.settings.church_fiscal_year_start_month || 1);
+  const t = hobartToday();
+  const current = +t.slice(5, 7) >= start ? +t.slice(0, 4) : +t.slice(0, 4) - 1;
+  const year = h("select", { "aria-label": "연도" }, [0, 1, 2, 3].map((i) => {
+    const y = current - i;
+    return h("option", { value: y }, start === 1 ? `${y}년` : `${y}-${String(y + 1).slice(2)}`);
+  }));
+  const view = h("select", { "aria-label": "보기" }, h("option", { value: "family" }, "가정별"), h("option", { value: "person" }, "개인별"));
   const q = h("input", { type: "search", placeholder: "이름 검색", "aria-label": "이름 검색" });
-  const which = h("select", { "aria-label": "보기" },
-    h("option", { value: "current" }, "현재 교인"),
-    h("option", { value: "left" }, "떠난 분 (떠남·이명·별세)"),
-    h("option", { value: "all" }, "전체"));
-  const list = h("ul", { class: "list" });
-  const counter = h("span", { class: "muted" });
+  const out = h("div");
   let seq = 0;
   const load = async () => {
     const mine = ++seq;
-    const p = new URLSearchParams({ include_inactive: "1" });
-    if (q.value.trim()) p.set("q", q.value.trim());
-    const rows = (await api("GET", `/api/members?${p}`)).filter((m) =>
-      which.value === "all" ? true : which.value === "left" ? LEFT_CODES.has(m.current_status) : !LEFT_CODES.has(m.current_status));
+    const r = fiscalRange(start, Number(year.value), "year");
+    const [members, giving] = await Promise.all([
+      api("GET", "/api/members?include_inactive=1"),
+      api("GET", `/api/registry/giving?from=${r.from}&to=${r.to}`),
+    ]);
     if (mine !== seq) return;
-    counter.textContent = `${rows.length}명`;
-    list.replaceChildren(
-      ...(rows.length
-        ? rows.map((m) =>
-            h("li", {},
-              h("a", { class: "grow", href: `#registry/${m.id}`, style: "color:inherit;text-decoration:none" },
-                h("b", {}, m.name), " ", titleTag(m.current_title), " ", statusTag(m.current_status),
-                h("div", { class: "muted" }, [m.relation, m.birth_date ? `${ageOf(m.birth_date)}세` : null, m.member_code ? null : "직접 등록"].filter(Boolean).join(" · "))),
-              h("span", { class: "muted shrink" }, "›")))
-        : [h("li", { class: "muted" }, "해당하는 분이 없습니다.")]),
-    );
+    const gave = new Map(giving.map((g) => [g.member_id, g.total_cents]));
+    const amount = (m) => gave.get(m.id) ?? 0;
+    const byCode = (a, b) => (a.member_code ?? "~").localeCompare(b.member_code ?? "~") || a.name.localeCompare(b.name);
+    const families = new Map();
+    for (const m of [...members].sort(byCode)) {
+      const key = m.family_code ?? `solo-${m.id}`;
+      if (!families.has(key)) families.set(key, []);
+      families.get(key).push(m);
+    }
+    const term = q.value.normalize("NFC").trim().toLowerCase();
+    const match = (m) => !term || m.name.toLowerCase().includes(term);
+    const total = members.reduce((n, m) => n + amount(m), 0);
+    const person = (m, showFamily) =>
+      h("li", {},
+        h("div", { class: "grow" }, h("b", {}, m.name), " ", titleTag(m.current_title), m.is_active ? "" : [" ", statusTag(m.current_status)],
+          h("div", { class: "muted" }, [showFamily ? familyName(m) : null, m.member_code].filter(Boolean).join(" · ") || "교인ID 없음")),
+        h("span", { class: "num" }, money(amount(m))));
+    const familyName = (m) => {
+      const f = families.get(m.family_code ?? `solo-${m.id}`);
+      return f.length > 1 ? `${f[0].name} 가정` : null;
+    };
+    let body;
+    if (view.value === "person") {
+      const rows = members.filter(match).sort((a, b) => amount(b) - amount(a) || byCode(a, b));
+      body = h("ul", { class: "list" }, rows.length ? rows.map((m) => person(m, true)) : h("li", { class: "muted" }, "해당하는 분이 없습니다."));
+    } else {
+      const groups = [...families.values()]
+        .filter((f) => f.some(match))
+        .map((f) => ({ f, sum: f.reduce((n, m) => n + amount(m), 0) }))
+        .sort((a, b) => b.sum - a.sum || byCode(a.f[0], b.f[0]));
+      body = groups.length
+        ? groups.map(({ f, sum }) =>
+            h("div", { class: "family" },
+              h("div", { class: "family-head" },
+                h("b", {}, f.length > 1 ? `${f[0].name} 가정 (${f.length}명)` : f[0].name),
+                h("span", { class: "muted" }, f[0].family_code ?? ""),
+                h("b", { class: "num" }, money(sum))),
+              f.length > 1 ? h("ul", { class: "list" }, f.map((m) => person(m, false))) : null))
+        : h("p", { class: "muted" }, "해당하는 분이 없습니다.");
+    }
+    out.replaceChildren(
+      h("p", { class: "muted" }, `${r.from} ~ ${r.to} · 교인 ${members.length}명 · 가정 ${families.size} · 교인 헌금 합계 ${money(total)} (무기명·방문자 헌금 제외, 취소 제외)`),
+      ...[body].flat());
   };
   let timer;
   q.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => act(null, load), 250); });
-  which.addEventListener("change", () => act(null, load));
+  for (const el of [year, view]) el.addEventListener("change", () => act(null, load));
 
-  // Pastor only: people who aren't in the sheet (e.g. a regular visitor who gives).
+  // People who aren't on the roster yet (e.g. a regular visitor who now gives regularly).
   const name = h("input", { placeholder: "이름", maxlength: 50 });
-  const relation = h("input", { placeholder: "관계 (선택, 예: 본인·자녀)", maxlength: 20 });
   const note = h("input", { placeholder: "메모 (선택)", maxlength: 300 });
   const add = h("button", { type: "button" }, "추가");
   add.onclick = () =>
     act(add, async () => {
-      await api("POST", "/api/members", { name: name.value, relation: relation.value, note: note.value });
-      name.value = relation.value = note.value = "";
+      await api("POST", "/api/members", { name: name.value, note: note.value });
+      name.value = note.value = "";
       toast("추가했습니다.");
       await load();
     });
 
-  const expiring = h("div");
-  const loadExpiring = async () => {
-    const rows = await api("GET", `/api/registry/expiring?year=${thisYear()}`);
-    expiring.replaceChildren(
-      ...(rows.length
-        ? [h("div", { class: "card" },
-            h("h3", {}, `${thisYear()}년 임기 만료 예정 (${rows.length}명)`),
-            h("ul", { class: "list" }, rows.map((r) =>
-              h("li", {}, h("a", { class: "grow", href: `#registry/${r.member_id}` }, `${r.member_name} · ${r.title_name}`), h("span", { class: "muted" }, `~${r.end_date}`)))))]
-        : []),
-    );
-  };
-
-  // Pastor only: sheet rows held back because someone with the same name was entered by hand.
-  const pending = h("div");
-  const loadPending = async () => {
-    if (!isRegistryAdmin()) return;
-    const rows = await api("GET", "/api/registry/pending");
-    pending.replaceChildren(
-      ...(rows.length
-        ? [h("div", { class: "card" },
-            h("h3", {}, `시트에서 온 분 확인 필요 (${rows.length}명)`),
-            h("p", { class: "muted" }, "이미 직접 등록된 같은 이름의 분이 있습니다. 같은 분이면 '같은 분'을, 다른 분이면 '새로 등록'을 누르세요. 같은 분으로 연결하면 지난 헌금 기록이 그대로 이어집니다."),
-            h("ul", { class: "list" }, rows.map((p) =>
-              h("li", { style: "flex-wrap:wrap" },
-                h("div", { class: "grow" }, h("b", {}, p.name), " ", h("span", { class: "muted" }, [p.relation, p.birth_date ? `${p.birth_date}생` : "생년월일 없음", p.member_code].filter(Boolean).join(" · "))),
-                h("div", { class: "row shrink" },
-                  ...p.candidates.map((cand) =>
-                    h("button", { type: "button", class: "secondary small", onclick: async (e) => {
-                      const btn = e.currentTarget;
-                      if (!(await ask(`시트의 '${p.name}'(${p.member_code})을(를) 이미 등록된 '${cand.name}'${cand.note ? `(${cand.note})` : ""}과(와) 같은 분으로 연결할까요?`))) return;
-                      act(btn, async () => { await api("POST", `/api/registry/pending/${p.member_code}/link`, { member_id: cand.id }); toast("연결했습니다."); await Promise.all([load(), loadPending()]); });
-                    } }, `같은 분: ${cand.name} (${[cand.birth_date ? `${cand.birth_date}생` : "생년월일 없음", cand.relation, cand.note].filter(Boolean).join(", ")})`)),
-                  h("button", { type: "button", class: "small", onclick: async (e) => {
-                    const btn = e.currentTarget;
-                    if (!(await ask(`'${p.name}'을(를) 다른 분으로 새로 등록할까요?`))) return;
-                    act(btn, async () => { await api("POST", `/api/registry/pending/${p.member_code}/create`, {}); toast("새로 등록했습니다."); await Promise.all([load(), loadPending()]); });
-                  } }, "새로 등록"))))))]
-        : []),
-    );
-  };
-
   paint(ticket,
-    h("h2", {}, "교적부"),
-    importCard(() => Promise.all([load(), loadExpiring(), loadPending()])),
-    pending,
-    h("p", { class: "muted" }, "새가족은 목양 시트에서 자동으로 들어옵니다. 직분과 출석 상태는 여기에서 관리합니다."),
-    expiring,
+    h("h2", {}, "교인 명부"),
     h("div", { class: "card" },
-      h("div", { class: "row" }, q, which),
-      h("div", { class: "mt" }, counter),
-      list),
-    h("div", { class: "card registry-only" }, h("h3", {}, "직접 추가 (시트에 없는 분)"), h("div", { class: "grid" }, name, relation, note, add)),
+      h("div", { class: "row" }, year, view),
+      h("div", { class: "mt" }, q),
+      h("div", { class: "mt" }, out)),
+    importCard(load),
+    h("details", { class: "card" },
+      h("summary", {}, h("b", {}, "한 분 직접 추가")),
+      h("p", { class: "muted mt" }, "명부 파일에 아직 없는 분만 여기서 추가합니다. 가정 묶음(가정ID)은 교인명부 CSV로 넣습니다."),
+      h("div", { class: "grid" }, name, note, add)),
   );
-  await act(null, () => Promise.all([load(), loadExpiring(), loadPending()]));
-}
-
-async function renderRegistryMember(ticket, id) {
-  const [m, titles] = await Promise.all([api("GET", `/api/registry/members/${id}`), api("GET", "/api/registry/titles")]);
-  const reload = () => { renderRegistry(); };
-
-  const voidBtn = (path, what) =>
-    h("button", { type: "button", class: "danger small registry-only", onclick: async (e) => {
-      const btn = e.currentTarget;
-      const reason = await ask(`${what}\n이 기록을 취소합니다. 사유를 입력하세요.`, { input: "", okText: "취소 처리", cancelText: "닫기", required: true });
-      if (reason === null) return;
-      act(btn, async () => { await api("POST", path, { reason }); toast("취소했습니다."); reload(); });
-    } }, "취소");
-
-  // 직분 추가
-  const titleSel = h("select", { "aria-label": "직분" }, h("option", { value: "" }, "직분 선택"),
-    titles.filter((t) => t.is_active).map((t) => h("option", { value: t.id }, t.term_limited ? `${t.name} (1년 임기)` : t.name)));
-  const tStart = h("input", { type: "date", value: hobartToday(), "aria-label": "시작일" });
-  const tEnd = h("input", { type: "date", "aria-label": "종료일" });
-  const tNote = h("input", { placeholder: "메모 (선택)", maxlength: 300 });
-  const syncEnd = () => {
-    const t = titles.find((x) => String(x.id) === titleSel.value);
-    tEnd.value = t?.term_limited && tStart.value ? `${tStart.value.slice(0, 4)}-12-31` : "";
-  };
-  titleSel.addEventListener("change", syncEnd);
-  tStart.addEventListener("change", syncEnd);
-  syncEnd();
-  const tAdd = h("button", { type: "button" }, "직분 추가");
-  tAdd.onclick = () =>
-    act(tAdd, async () => {
-      const t = titles.find((x) => String(x.id) === titleSel.value);
-      if (!t) throw new Error("직분을 고르세요.");
-      if (!(await ask(`${m.name}: ${t.name}\n${tStart.value} ~ ${tEnd.value || "(계속)"}\n이렇게 기록할까요?`, { okText: "기록" }))) return;
-      await api("POST", `/api/registry/members/${id}/titles`, {
-        title_id: Number(titleSel.value), start_date: tStart.value, end_date: tEnd.value || null, note: tNote.value || undefined,
-      });
-      toast("직분을 기록했습니다.");
-      reload();
-    });
-
-  // 상태 추가
-  const sSel = h("select", { "aria-label": "상태" }, h("option", { value: "" }, "상태 선택"),
-    Object.entries(STATUS_LABELS).filter(([k]) => k !== "registered").map(([k, v]) => h("option", { value: k }, v)));
-  const sDate = h("input", { type: "date", value: hobartToday(), max: hobartToday(), "aria-label": "날짜" });
-  const sNote = h("input", { placeholder: "메모 (선택)", maxlength: 300 });
-  const sAdd = h("button", { type: "button" }, "상태 기록");
-  sAdd.onclick = () =>
-    act(sAdd, async () => {
-      if (!sSel.value) throw new Error("상태를 고르세요.");
-      const label = STATUS_LABELS[sSel.value];
-      const warn = LEFT_CODES.has(sSel.value) ? "\n이렇게 기록하면 헌금 입력의 이름 목록에서 빠집니다. (지난 기록은 그대로 남습니다.)" : "";
-      if (!(await ask(`${m.name}: ${sDate.value} ${label}${warn}\n기록할까요?`, { okText: "기록" }))) return;
-      await api("POST", `/api/registry/members/${id}/status`, { status_code: sSel.value, event_date: sDate.value, note: sNote.value || undefined });
-      toast("상태를 기록했습니다.");
-      reload();
-    });
-
-  const years = [...new Set(m.giving_by_year.map((g) => g.year))];
-  paint(ticket,
-    h("p", {}, h("a", { href: "#registry" }, "‹ 교적부 목록")),
-    h("h2", {}, m.name, " ", titleTag(m.current_title), " ", statusTag(m.current_status)),
-    h("div", { class: "card" },
-      h("ul", { class: "list" },
-        h("li", {}, h("span", {}, "관계"), h("b", {}, m.relation ?? "-")),
-        h("li", {}, h("span", {}, "생년월일"),
-          h("span", {}, h("b", {}, m.birth_date ? `${m.birth_date} (${ageOf(m.birth_date)}세)` : "-"), " ",
-            h("button", { type: "button", class: "mini registry-only", onclick: async (ev) => {
-              const btn = ev.currentTarget;
-              const v = await ask(`${m.name}의 생년월일 (YYYY-MM-DD)\n같은 이름의 분을 구분하고, 시트 연동 때 같은 분을 찾는 데 쓰입니다.`, { input: m.birth_date ?? "", okText: "저장" });
-              if (v === null) return;
-              act(btn, async () => {
-                const val = v.trim();
-                if (val && !isRealYmd(val)) throw new Error("YYYY-MM-DD 형식의 실제 날짜를 넣으세요. (예: 1960-05-01)");
-                await api("PATCH", `/api/members/${id}`, { birth_date: val || null, expected: { birth_date: m.birth_date } });
-                toast("생년월일을 저장했습니다.");
-                reload();
-              });
-            } }, "수정"))),
-        h("li", {}, h("span", {}, "교인ID"), h("b", {}, m.member_code ?? "직접 등록")),
-        h("li", {}, h("span", {}, "등록일"), h("b", {}, m.registered_on ?? "-")),
-        m.family.length
-          ? h("li", {}, h("span", {}, "가족"), h("span", { class: "grow", style: "text-align:right" },
-              m.family.flatMap((f, i) => [i ? ", " : "", h("a", { href: `#registry/${f.id}` }, `${f.name}${f.relation ? `(${f.relation}${f.birth_date ? `, ${ageOf(f.birth_date)}세` : ""})` : ""}`)])))
-          : null)),
-    h("div", { class: "card" },
-      h("h3", {}, "직분 이력"),
-      m.titles.length
-        ? h("ul", { class: "list" }, m.titles.map((t) =>
-            h("li", { class: t.status === "void" ? "void-row" : "" },
-              h("div", { class: "grow" }, h("b", {}, t.title_name), ` ${t.start_date} ~ ${t.end_date ?? ""}`,
-                t.note ? h("div", { class: "muted" }, t.note) : null,
-                t.status === "void" ? h("div", {}, h("span", { class: "tag void" }, "취소됨"), " ", t.void_reason) : null),
-              t.status === "active" ? voidBtn(`/api/registry/member-titles/${t.id}/void`, `${t.title_name} ${t.start_date}`) : null)))
-        : h("p", { class: "muted" }, "직분 기록이 없습니다."),
-      h("div", { class: "grid mt registry-only" },
-        h("div", { class: "row" }, h("div", {}, h("label", {}, "직분"), titleSel), h("div", {}, h("label", {}, "시작일"), tStart), h("div", {}, h("label", {}, "종료일 (비우면 계속)"), tEnd)),
-        tNote, tAdd)),
-    h("div", { class: "card" },
-      h("h3", {}, "출석 상태 이력"),
-      h("ul", { class: "list" }, m.statuses.map((s) =>
-        h("li", { class: s.status === "void" ? "void-row" : "" },
-          h("div", { class: "grow" }, statusTag(s.status_code), ` ${s.event_date}`,
-            s.note ? h("div", { class: "muted" }, s.note) : null,
-            s.status === "void" ? h("div", {}, h("span", { class: "tag void" }, "취소됨"), " ", s.void_reason) : null),
-          s.status === "active" ? voidBtn(`/api/registry/status-events/${s.id}/void`, `${STATUS_LABELS[s.status_code]} ${s.event_date}`) : null))),
-      h("div", { class: "grid mt registry-only" },
-        h("div", { class: "row" }, h("div", {}, h("label", {}, "상태"), sSel), h("div", {}, h("label", {}, "날짜"), sDate)),
-        sNote, sAdd)),
-    h("div", { class: "card" },
-      h("h3", {}, "헌금 합계 (연도별)"),
-      years.length
-        ? h("table", {}, h("tbody", {}, years.flatMap((y) => {
-            const rows = m.giving_by_year.filter((g) => g.year === y);
-            const total = rows.reduce((s, g) => s + g.total_cents, 0);
-            return [
-              h("tr", {}, h("th", {}, `${y}년`), h("th", { class: "num" }, money(total))),
-              ...rows.map((g) => h("tr", {}, h("td", { class: "muted" }, `${g.fund_type_name} (${g.count}건)`), h("td", { class: "num" }, money(g.total_cents)))),
-            ];
-          })))
-        : h("p", { class: "muted" }, "헌금 기록이 없습니다.")),
-  );
+  await act(null, load);
 }
 
 // ---------- 시트에서 가져오기 (CSV) ----------
@@ -1410,53 +1283,74 @@ function importCard(after) {
     out);
 }
 
-function titlesCard() {
-  // The title list is fixed for this church; only shown here. Titles are given to people in 교적부.
-  const list = h("div", { class: "chips" });
-  const load = async () => {
-    const rows = await api("GET", "/api/registry/titles");
-    list.replaceChildren(...rows.filter((t) => t.is_active).map((t) =>
-      h("div", { class: "chip-item" }, h("span", { class: "grow" }, t.name), t.term_limited ? h("span", { class: "tag" }, "1년 임기") : null)));
-  };
-  const card = h("div", { class: "card" }, h("h3", {}, "직분"), list,
-    h("p", { class: "muted mt" }, "직분은 교적부에서 각 교인에게 기록합니다. 서리집사는 1년 임기로, 종료일이 그해 12월 31일로 자동 입력됩니다."));
-  return { card, load };
-}
-
-// ---------- 설정 ----------
-
-function lookupCard(title, path) {
-  // Compact: items flow in a grid (2+ per row on wider screens) with small inline actions.
-  const list = h("div", { class: "chips" });
-  const load = async () => {
-    const rows = await api("GET", `${path}?include_inactive=1`);
-    list.replaceChildren(
-      ...(rows.length
-        ? rows.map((r) =>
-            h("div", { class: `chip-item ${r.is_active ? "" : "off"}` },
-              h("span", { class: "grow" }, r.name, r.is_active ? "" : h("span", { class: "muted" }, " (중지)")),
-              h("span", { class: "editor-only" },
-                h("button", { type: "button", class: "mini", title: "이름 변경", onclick: async (e) => {
-                  const btn = e.currentTarget;
-                  const name = await ask("새 이름", { input: r.name, okText: "변경" });
-                  if (name === null) return;
-                  act(btn, async () => { await api("PATCH", `${path}/${r.id}`, { name }); await load(); });
-                } }, "변경"),
-                h("button", { type: "button", class: "mini danger-text", onclick: (e) =>
-                  act(e.currentTarget, async () => { await api("PATCH", `${path}/${r.id}`, { is_active: !r.is_active }); await load(); }) },
-                  r.is_active ? "중지" : "사용"))))
-        : [h("p", { class: "muted" }, "항목이 없습니다.")]),
-    );
-  };
-  const input = h("input", { placeholder: "새 항목 이름", maxlength: 50 });
+/**
+ * A list everyone picks from (offering types, titles, departments, expense categories) as compact
+ * pills. Only the pastor gets '편집': add (several at once, comma-separated), rename, or take an
+ * item off the list. Nothing is deleted; past records keep the name they were saved with.
+ */
+function listCard(title, path, { tag, note } = {}) {
+  const pills = h("div", { class: "pills" });
+  const editBtn = h("button", { type: "button", class: "mini registry-only" }, "편집");
+  const input = h("input", { placeholder: "새 항목 (여러 개는 쉼표로: 교육부, 청년부)", maxlength: 300, "aria-label": `${title} 추가` });
   const add = h("button", { type: "button", class: "shrink" }, "추가");
+  const addRow = h("div", { class: "row mt", hidden: true }, input, add);
+  let editing = false;
+  let rows = [];
+  const draw = () => {
+    const shown = editing ? rows : rows.filter((r) => r.is_active);
+    pills.replaceChildren(...(shown.length
+      ? shown.map((r) =>
+          h("span", { class: `pill ${r.is_active ? "" : "off"}` }, r.name, tag?.(r) ?? null,
+            editing
+              ? [
+                  h("button", { type: "button", class: "pill-btn", "aria-label": `${r.name} 이름 바꾸기`, onclick: (e) => rename(e.currentTarget, r) }, "✎"),
+                  h("button", { type: "button", class: "pill-btn", "aria-label": r.is_active ? `${r.name} 목록에서 빼기` : `${r.name} 다시 쓰기`, onclick: (e) => toggle(e.currentTarget, r) }, r.is_active ? "×" : "↺"),
+                ]
+              : null))
+      : [h("span", { class: "muted" }, editing ? "아래에서 추가하세요." : "항목이 없습니다.")]));
+    editBtn.textContent = editing ? "완료" : "편집";
+    addRow.hidden = !editing;
+  };
+  const load = async () => {
+    rows = await api("GET", `${path}?include_inactive=1`);
+    draw();
+  };
+  const rename = async (btn, r) => {
+    const name = await ask(`'${r.name}'의 새 이름`, { input: r.name, okText: "변경" });
+    if (name === null || name.trim() === r.name) return;
+    await act(btn, async () => { await api("PATCH", `${path}/${r.id}`, { name }); await load(); });
+  };
+  const toggle = async (btn, r) => {
+    if (r.is_active && !(await ask(`'${r.name}'을(를) 목록에서 뺄까요?\n지난 기록은 그대로 남고, 새로 입력할 때 목록에 나오지 않습니다. (↺로 다시 쓸 수 있습니다)`, { okText: "빼기" }))) return;
+    await act(btn, async () => { await api("PATCH", `${path}/${r.id}`, { is_active: !r.is_active }); await load(); });
+  };
   add.onclick = () =>
     act(add, async () => {
-      await api("POST", path, { name: input.value, sort_order: 100 });
+      const names = [...new Set(input.value.split(/[,，\n]/).map((v) => v.trim()).filter(Boolean))];
+      if (!names.length) throw new Error("이름을 입력하세요.");
+      const failed = [];
+      for (const name of names) {
+        try {
+          await api("POST", path, { name, sort_order: 100 });
+        } catch (err) {
+          failed.push(`${name}(${err.message})`);
+        }
+      }
       input.value = "";
       await load();
+      if (failed.length) throw new Error(`추가하지 못함: ${failed.join(", ")}`);
+      toast(`${names.length}개를 추가했습니다.`);
     });
-  const card = h("div", { class: "card" }, h("h3", {}, title), list, h("div", { class: "row mt editor-only" }, input, add));
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) add.click(); });
+  editBtn.onclick = () => {
+    editing = !editing;
+    draw();
+    if (editing) input.focus();
+  };
+  const card = h("div", { class: "card" },
+    h("div", { class: "card-head" }, h("h3", {}, title), editBtn),
+    pills, addRow,
+    note ? h("p", { class: "muted mt" }, note) : null);
   return { card, load };
 }
 
@@ -1513,10 +1407,11 @@ async function renderSettings() {
   const ticket = newTicket();
   const cards = [
     openingBalanceCard(),
-    lookupCard("헌금 종류", "/api/fund-types"),
-    ...(isRegistryAdmin() ? [titlesCard()] : []), // titles live in the pastor-only 교적부
-    lookupCard("부서", "/api/departments"),
-    lookupCard("지출 항목", "/api/expense-categories"),
+    listCard("헌금 종류", "/api/fund-types"),
+    // Titles come with the member list, which only the pastor sees.
+    ...(isRegistryAdmin() ? [listCard("직분", "/api/registry/titles", { tag: (t) => (t.term_limited ? h("span", { class: "tag" }, "1년") : null) })] : []),
+    listCard("부서", "/api/departments"),
+    listCard("지출 항목", "/api/expense-categories"),
   ];
   const s = state.settings;
   paint(ticket, 

@@ -87,7 +87,7 @@ describe("audit log, users and settings", () => {
   beforeEach(resetDb);
 
   it("pages through the audit log newest-first", async () => {
-    for (const n of ["a1", "a2", "a3"]) await call("POST", "/api/departments", { as: EDITOR, body: { name: n } });
+    for (const n of ["a1", "a2", "a3"]) await call("POST", "/api/departments", { as: PASTOR, body: { name: n } });
     const page1 = await json(await call("GET", "/api/audit-log?limit=2", { as: PASTOR }));
     expect(page1.map((l: { after: { name: string } }) => l.after.name)).toEqual(["a3", "a2"]);
     const page2 = await json(await call("GET", `/api/audit-log?limit=2&before_id=${page1[1].id}`, { as: PASTOR }));

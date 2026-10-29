@@ -83,37 +83,42 @@ describe("authentication and authorization", () => {
     expect((await json(res)).role).toBe("editor");
   });
 
-  it("lets a viewer read but not write", async () => {
+  it("lets a viewer read finance but not record it; the lists everyone picks from are the pastor's", async () => {
     expect((await call("GET", "/api/fund-types", { as: PASTOR })).status).toBe(200);
     expect((await call("GET", "/api/audit-log", { as: PASTOR })).status).toBe(200);
-    const res = await call("POST", "/api/fund-types", { as: PASTOR, body: { name: "특별헌금" } });
-    expect(res.status).toBe(403);
-    expect((await call("PATCH", "/api/fund-types/1", { as: PASTOR, body: { name: "x" } })).status).toBe(403);
     expect((await call("POST", "/api/opening-balances", { as: PASTOR, body: {} })).status).toBe(403);
+    expect((await call("POST", "/api/offerings", { as: PASTOR, body: {} })).status).toBe(403);
+    // finance editors pick from the lists but cannot change them
+    for (const path of ["/api/fund-types", "/api/departments", "/api/expense-categories"]) {
+      expect((await call("POST", path, { as: EDITOR, body: { name: "특별" } })).status).toBe(403);
+    }
+    expect((await call("PATCH", "/api/fund-types/1", { as: EDITOR, body: { name: "x" } })).status).toBe(403);
+    expect((await call("POST", "/api/registry/titles", { as: EDITOR, body: { name: "x" } })).status).toBe(403);
     // Nothing was written.
     const n = await db.prepare("SELECT COUNT(*) AS n FROM audit_log").first<{ n: number }>();
     expect(n!.n).toBe(0);
   });
 
   it("denies unknown write methods to viewers too", async () => {
-    expect((await call("DELETE", "/api/fund-types/1", { as: PASTOR })).status).toBe(403);
-    expect((await call("PUT", "/api/fund-types/1", { as: PASTOR, body: {} })).status).toBe(403);
+    expect((await call("DELETE", "/api/offerings/1", { as: PASTOR })).status).toBe(403);
+    expect((await call("PUT", "/api/expenses/1", { as: PASTOR, body: {} })).status).toBe(403);
+    expect((await call("DELETE", "/api/fund-types/1", { as: EDITOR })).status).toBe(403);
   });
 
   it("blocks cross-site writes (foreign or opaque Origin) and non-JSON bodies", async () => {
     const body = { name: "특별헌금" };
-    const foreign = await call("POST", "/api/fund-types", { as: EDITOR, body, headers: { Origin: "https://evil.example" } });
+    const foreign = await call("POST", "/api/fund-types", { as: PASTOR, body, headers: { Origin: "https://evil.example" } });
     expect(foreign.status).toBe(403);
-    const opaque = await call("POST", "/api/fund-types", { as: EDITOR, body, headers: { Origin: "null" } });
+    const opaque = await call("POST", "/api/fund-types", { as: PASTOR, body, headers: { Origin: "null" } });
     expect(opaque.status).toBe(403);
     const form = await call("POST", "/api/fund-types", {
-      as: EDITOR,
+      as: PASTOR,
       body,
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
     });
     expect(form.status).toBe(415);
     const same = await call("POST", "/api/fund-types", {
-      as: EDITOR,
+      as: PASTOR,
       body,
       headers: { Origin: "https://finance.example.org" },
     });

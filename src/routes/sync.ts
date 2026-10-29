@@ -41,7 +41,7 @@ export const peopleSchema = z.object({ people: z.array(personSchema).min(1).max(
 type Person = z.infer<typeof personSchema>;
 
 /** Sheet spellings that mean one of our titles. */
-const TITLE_ALIASES: Record<string, string> = { 집사: "서리집사", 시무장로: "장로", 시무권사: "권사", 안수집사: "장립집사" };
+const TITLE_ALIASES: Record<string, string> = { 집사: "서리집사", 시무장로: "장로", 시무권사: "권사", 안수집사: "장립집사", 담임목사: "목사" };
 
 interface Existing {
   id: number;

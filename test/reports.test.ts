@@ -4,7 +4,7 @@ import { EDITOR, PASTOR, call, db, json, resetDb } from "./helpers";
 async function seed() {
   await call("POST", "/api/opening-balances", { as: EDITOR, body: { account: "cash", as_of_date: "2026-10-01", amount_cents: 100000 } });
   await call("POST", "/api/opening-balances", { as: EDITOR, body: { account: "bank", as_of_date: "2026-10-01", amount_cents: 2000000 } });
-  const d = await json(await call("POST", "/api/departments", { as: EDITOR, body: { name: "교육부" } }));
+  const d = await json(await call("POST", "/api/departments", { as: PASTOR, body: { name: "교육부" } }));
   const off = (date: string, entries: unknown[]) => call("POST", "/api/offerings", { as: EDITOR, body: { offering_date: date, entries } });
   await off("2026-10-04", [{ fund_type_id: 1, amount_cents: 30000, method: "cash" }, { fund_type_id: 2, amount_cents: 50000, method: "online" }]);
   const [v] = await json(await off("2026-11-01", [{ fund_type_id: 6, amount_cents: 99900, method: "cash", note: "=HYPERLINK(\"x\")" }]));
