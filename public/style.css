@@ -96,10 +96,15 @@ dialog.photos { width: min(560px, calc(100vw - 32px)); }
 .pill.off { color: var(--muted); text-decoration: line-through; background: #f3f4f6; }
 .pill .tag { font-size: 11px; padding: 0 6px; }
 button.pill-btn { min-height: 28px; min-width: 28px; padding: 0 4px; border: 0; background: transparent; color: var(--brand); font-size: 15px; }
-.family { border-top: 1px solid var(--line); padding: 8px 0; }
-.family-head { display: flex; align-items: baseline; gap: 8px; }
+.family { margin-top: 8px; }
+.family-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; background: var(--brand-soft); color: var(--brand); }
 .family-head .num { margin-left: auto; }
-.family .list { margin: 4px 0 0 12px; }
+.family-head .count { font-size: 13px; opacity: .8; }
+.family .list { margin: 2px 0 0 14px; }
+.family .list li.member { padding: 6px 4px; font-size: 15px; color: var(--text); }
+.family .list li.member .num { color: var(--muted); }
+.family-total { display: flex; justify-content: space-between; align-items: baseline; font-size: 15px; }
+.small-note { font-size: 12px; margin: 2px 0 4px; }
 /* iOS Safari sizes date inputs by their content unless their native look is turned off. */
 input[type="date"] { -webkit-appearance: none; appearance: none; min-width: 0; display: block; text-align: left; }
 input[type="date"]::-webkit-date-and-time-value { text-align: left; }

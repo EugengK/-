@@ -1054,10 +1054,11 @@ async function renderRegistry() {
     const term = q.value.normalize("NFC").trim().toLowerCase();
     const match = (m) => !term || m.name.toLowerCase().includes(term);
     const total = members.reduce((n, m) => n + amount(m), 0);
+    // IDs stay behind the scenes: they group people and families, the screen shows names and amounts.
     const person = (m, showFamily) =>
-      h("li", {},
-        h("div", { class: "grow" }, h("b", {}, m.name), " ", titleTag(m.current_title), m.is_active ? "" : [" ", statusTag(m.current_status)],
-          h("div", { class: "muted" }, [showFamily ? familyName(m) : null, m.member_code].filter(Boolean).join(" · ") || "교인ID 없음")),
+      h("li", { class: "member" },
+        h("div", { class: "grow" }, m.name, " ", titleTag(m.current_title), m.is_active ? "" : [" ", statusTag(m.current_status)],
+          showFamily && familyName(m) ? h("span", { class: "muted" }, ` · ${familyName(m)}`) : null),
         h("span", { class: "num" }, money(amount(m))));
     const familyName = (m) => {
       const f = families.get(m.family_code ?? `solo-${m.id}`);
@@ -1076,14 +1077,15 @@ async function renderRegistry() {
         ? groups.map(({ f, sum }) =>
             h("div", { class: "family" },
               h("div", { class: "family-head" },
-                h("b", {}, f.length > 1 ? `${f[0].name} 가정 (${f.length}명)` : f[0].name),
-                h("span", { class: "muted" }, f[0].family_code ?? ""),
+                h("b", {}, f.length > 1 ? `${f[0].name} 가정` : f[0].name),
+                f.length > 1 ? h("span", { class: "count" }, `${f.length}명`) : titleTag(f[0].current_title),
                 h("b", { class: "num" }, money(sum))),
               f.length > 1 ? h("ul", { class: "list" }, f.map((m) => person(m, false))) : null))
         : h("p", { class: "muted" }, "해당하는 분이 없습니다.");
     }
     out.replaceChildren(
-      h("p", { class: "muted" }, `${r.from} ~ ${r.to} · 교인 ${members.length}명 · 가정 ${families.size} · 교인 헌금 합계 ${money(total)} (무기명·방문자 헌금 제외, 취소 제외)`),
+      h("div", { class: "family-total" }, h("span", {}, `교인 ${members.length}명 · ${families.size}가정`), h("b", { class: "num" }, money(total))),
+      h("p", { class: "muted small-note" }, "무기명·방문자·취소된 헌금은 빠집니다."),
       ...[body].flat());
   };
   let timer;
