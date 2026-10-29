@@ -24,6 +24,6 @@
     // Cloudflare Access: "<team>.cloudflareaccess.com" and the application's AUD tag.
     // While either is empty, every request is rejected (fails closed).
     "ACCESS_TEAM_DOMAIN": "round-pine-9680.cloudflareaccess.com",
-    "ACCESS_AUD": ""
+    "ACCESS_AUD": "cb4a177a7d9f0ebdef72d16f403219165d472919d062d1720631201bf8a6a151"
   }
 }
