@@ -17,7 +17,7 @@ describe("members", () => {
     await member("김철수", { note: "청년부" }); // same name, different person
     await member("이영희");
 
-    const found = await json(await call("GET", "/api/members?q=철수", { as: EDITOR }));
+    const found = await json(await call("GET", "/api/members?q=철수", { as: PASTOR }));
     expect(found).toHaveLength(2);
     expect(found[0].current_status).toBe("registered");
     expect(await json(await call("GET", "/api/members?q=%25", { as: EDITOR }))).toHaveLength(0); // literal %
@@ -26,6 +26,22 @@ describe("members", () => {
     expect(upd.status).toBe(200);
     expect(await json(upd)).toMatchObject({ phone: null });
     expect(await count("SELECT COUNT(*) AS n FROM audit_log WHERE table_name = 'members'")).toBe(4);
+  });
+
+  it("finance editors see only what offering entry needs; the 교적부 and its change log are the pastor's", async () => {
+    const a = await member("김철수", { phone: "0400 000 000", note: "상담 중", relation: "본인", birth_date: "1970-05-01" });
+    const [seen] = await json(await call("GET", "/api/members?q=철수", { as: EDITOR }));
+    expect(seen).toEqual({ id: a.id, name: "김철수", is_active: true, current_title: null, birth_year: "1970" });
+    for (const path of ["/api/registry/titles", `/api/registry/members/${a.id}`, "/api/registry/pending", "/api/registry/expiring?year=2026"]) {
+      expect((await call("GET", path, { as: EDITOR })).status).toBe(403);
+      expect((await call("GET", path, { as: PASTOR })).status).toBe(200);
+    }
+    const editorLog = await json(await call("GET", "/api/audit-log?limit=200", { as: EDITOR }));
+    expect(editorLog.some((r: any) => r.table_name === "members")).toBe(false);
+    const pastorLog = await json(await call("GET", "/api/audit-log?limit=200", { as: PASTOR }));
+    expect(pastorLog.some((r: any) => r.table_name === "members")).toBe(true);
+    // paging still works with the filter
+    expect((await call("GET", `/api/audit-log?limit=5&before_id=${pastorLog[0].id + 1}`, { as: EDITOR })).status).toBe(200);
   });
 
   it("validates; only the registry admin may change people", async () => {

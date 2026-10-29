@@ -81,9 +81,22 @@ function isSameHost(origin: string, requestUrl: string): boolean {
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
+const isRegistryPath = (path: string) => path === "/api/registry" || path.startsWith("/api/registry/");
+
+/**
+ * The 교적부 (birth dates, families, attendance history, notes) is the pastor's. Finance editors
+ * cannot read it either; they get only what offering entry needs from GET /api/members.
+ */
+export const guardRegistryReads: MiddlewareHandler<AppEnv> = async (c, next) => {
+  if (isRegistryPath(c.req.path) && !c.get("user").registry_admin) {
+    return c.json({ error: "교적부는 교적부 관리 권한이 있는 분만 볼 수 있습니다." }, 403);
+  }
+  await next();
+};
+
 /** Registry (교적부) writes belong to the pastor; everything else is finance and belongs to editors. */
 function mayWrite(user: AppUser, path: string): boolean {
-  if (path.startsWith("/api/registry/") || path === "/api/registry" || path.startsWith("/api/members")) {
+  if (isRegistryPath(path) || path.startsWith("/api/members")) {
     return user.registry_admin;
   }
   return user.role === "editor";

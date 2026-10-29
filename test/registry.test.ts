@@ -30,7 +30,7 @@ describe("titles (직분)", () => {
   beforeEach(resetDb);
 
   it("seeds the eight titles; 서리집사 is a yearly appointment", async () => {
-    const t = await json(await call("GET", "/api/registry/titles", { as: EDITOR }));
+    const t = await json(await call("GET", "/api/registry/titles", { as: PASTOR }));
     expect(t.map((x: any) => x.name)).toEqual(["성도", "청년", "서리집사", "장립집사", "권사", "장로", "전도사", "강도사"]);
     expect(t.find((x: any) => x.name === "서리집사").term_limited).toBe(true);
     expect(t.find((x: any) => x.name === "장로").term_limited).toBe(false);
@@ -58,7 +58,7 @@ describe("title history", () => {
     // A future appointment is not current yet.
     await call("POST", `/api/registry/members/${m.id}/titles`, { as: PASTOR, body: { title_id: 4, start_date: `${Number(year) + 1}-01-01` } });
 
-    const list = await json(await call("GET", "/api/members", { as: EDITOR }));
+    const list = await json(await call("GET", "/api/members", { as: PASTOR }));
     expect(list.find((x: any) => x.id === m.id).current_title).toBe("서리집사");
 
     const exp = await json(await call("GET", `/api/registry/expiring?year=${year}`, { as: PASTOR }));
@@ -81,7 +81,7 @@ describe("title history", () => {
     expect(t.end_date).toBeNull(); // 장로 is open-ended
     expect((await call("POST", `/api/registry/member-titles/${t.id}/void`, { as: PASTOR, body: { reason: "오입력" } })).status).toBe(200);
     expect((await call("POST", `/api/registry/member-titles/${t.id}/void`, { as: PASTOR, body: { reason: "오입력" } })).status).toBe(409);
-    const list = await json(await call("GET", "/api/members", { as: EDITOR }));
+    const list = await json(await call("GET", "/api/members", { as: PASTOR }));
     expect(list.find((x: any) => x.id === m.id).current_title).toBeNull();
   });
 });
@@ -91,18 +91,18 @@ describe("attendance status history", () => {
 
   it("left -> hidden from giver list; returned -> back; voiding recomputes", async () => {
     await sync({ people: [person("P-9", "떠난분", { registered_on: "2020-01-01" })] });
-    const m = (await json(await call("GET", "/api/members", { as: EDITOR }))).find((x: any) => x.member_code === "P-9");
+    const m = (await json(await call("GET", "/api/members", { as: PASTOR }))).find((x: any) => x.member_code === "P-9");
     const left = await json(await call("POST", `/api/registry/members/${m.id}/status`, { as: PASTOR, body: { status_code: "left", event_date: "2026-03-01", note: "타주 이사" } }));
-    expect((await json(await call("GET", "/api/members", { as: EDITOR }))).some((x: any) => x.id === m.id)).toBe(false);
-    const all = await json(await call("GET", "/api/members?include_inactive=1", { as: EDITOR }));
+    expect((await json(await call("GET", "/api/members", { as: PASTOR }))).some((x: any) => x.id === m.id)).toBe(false);
+    const all = await json(await call("GET", "/api/members?include_inactive=1", { as: PASTOR }));
     expect(all.find((x: any) => x.id === m.id).current_status).toBe("left");
 
     await call("POST", `/api/registry/members/${m.id}/status`, { as: PASTOR, body: { status_code: "returned", event_date: "2026-09-01" } });
-    expect((await json(await call("GET", "/api/members", { as: EDITOR }))).find((x: any) => x.id === m.id).current_status).toBe("returned");
+    expect((await json(await call("GET", "/api/members", { as: PASTOR }))).find((x: any) => x.id === m.id).current_status).toBe("returned");
 
     // An earlier-dated event added later does not override the latest one.
     await call("POST", `/api/registry/members/${m.id}/status`, { as: PASTOR, body: { status_code: "inactive", event_date: "2026-05-01" } });
-    expect((await json(await call("GET", "/api/members", { as: EDITOR }))).find((x: any) => x.id === m.id).current_status).toBe("returned");
+    expect((await json(await call("GET", "/api/members", { as: PASTOR }))).find((x: any) => x.id === m.id).current_status).toBe("returned");
 
     // Void "returned" -> the latest is now 'inactive' (still listed); void that too -> 'left' (hidden).
     const detail = await json(await call("GET", `/api/registry/members/${m.id}`, { as: PASTOR }));
@@ -110,7 +110,7 @@ describe("attendance status history", () => {
     const inactive = detail.statuses.find((s: any) => s.status_code === "inactive");
     await call("POST", `/api/registry/status-events/${returned.id}/void`, { as: PASTOR, body: { reason: "x" } });
     await call("POST", `/api/registry/status-events/${inactive.id}/void`, { as: PASTOR, body: { reason: "x" } });
-    expect((await json(await call("GET", "/api/members", { as: EDITOR }))).some((x: any) => x.id === m.id)).toBe(false);
+    expect((await json(await call("GET", "/api/members", { as: PASTOR }))).some((x: any) => x.id === m.id)).toBe(false);
     expect(left.status_code).toBe("left");
   });
 
@@ -126,7 +126,7 @@ describe("member detail", () => {
 
   it("shows titles, statuses, family and giving per year", async () => {
     await sync({ people: [person("P-1", "아빠"), person("P-2", "아이", { relation: "자녀" })] });
-    const [dad, kid] = (await json(await call("GET", "/api/members", { as: EDITOR }))).sort((a: any, b: any) => a.member_code.localeCompare(b.member_code));
+    const [dad, kid] = (await json(await call("GET", "/api/members", { as: PASTOR }))).sort((a: any, b: any) => a.member_code.localeCompare(b.member_code));
     const post = (d: string, cents: number, fund = 1) =>
       call("POST", "/api/offerings", { as: EDITOR, body: { offering_date: d, entries: [{ fund_type_id: fund, amount_cents: cents, method: "cash", member_id: kid.id }] } });
     await post("2025-12-28", 500);
@@ -184,7 +184,7 @@ describe("sheet sync", () => {
 
   it("never marks people as left and keeps titles/status set by the pastor", async () => {
     await sync({ people: [person("P-1", "a"), person("P-2", "b")] });
-    const a = (await json(await call("GET", "/api/members", { as: EDITOR }))).find((x: any) => x.member_code === "P-1");
+    const a = (await json(await call("GET", "/api/members", { as: PASTOR }))).find((x: any) => x.member_code === "P-1");
     await call("POST", `/api/registry/members/${a.id}/status`, { as: PASTOR, body: { status_code: "left", event_date: "2026-10-01" } });
     await call("POST", `/api/registry/members/${a.id}/titles`, { as: PASTOR, body: { title_id: 5, start_date: "2026-01-01" } });
     await sync({ people: [person("P-2", "b")] }); // P-1 no longer sent
@@ -254,7 +254,7 @@ describe("review fixes: no duplicates on first sync, history consistency", () =>
 
   it("cannot link to someone already linked", async () => {
     await sync({ people: [person("P-1", "최")] });
-    const linkedOne = (await json(await call("GET", "/api/members", { as: EDITOR })))[0];
+    const linkedOne = (await json(await call("GET", "/api/members", { as: PASTOR })))[0];
     await newMember("최");
     await sync({ people: [person("P-2", "최")] });
     expect((await call("POST", "/api/registry/pending/P-2/link", { as: PASTOR, body: { member_id: linkedOne.id } })).status).toBe(409);
@@ -265,14 +265,14 @@ describe("review fixes: no duplicates on first sync, history consistency", () =>
     const m = await newMember("미래");
     const r = await call("POST", `/api/registry/members/${m.id}/status`, { as: PASTOR, body: { status_code: "transferred", event_date: "2099-01-01" } });
     expect(r.status).toBe(400);
-    expect((await json(await call("GET", "/api/members", { as: EDITOR }))).some((x: any) => x.id === m.id)).toBe(true);
+    expect((await json(await call("GET", "/api/members", { as: PASTOR }))).some((x: any) => x.id === m.id)).toBe(true);
   });
 });
 
 describe("birth date and first title from the sheet; CSV import", () => {
   beforeEach(resetDb);
   const detail = async (code: string) => {
-    const m = (await json(await call("GET", "/api/members?include_inactive=1", { as: EDITOR }))).find((x: any) => x.member_code === code);
+    const m = (await json(await call("GET", "/api/members?include_inactive=1", { as: PASTOR }))).find((x: any) => x.member_code === code);
     return json(await call("GET", `/api/registry/members/${m.id}`, { as: PASTOR }));
   };
 
@@ -336,7 +336,7 @@ describe("church roster import (no IDs) and auto-linking", () => {
   beforeEach(resetDb);
   const roster = (people: unknown[], as = PASTOR) => call("POST", "/api/registry/import-roster", { as, body: { people } });
   const byName = async (name: string) =>
-    (await json(await call("GET", "/api/members?include_inactive=1", { as: EDITOR }))).filter((m: any) => m.name === name);
+    (await json(await call("GET", "/api/members?include_inactive=1", { as: PASTOR }))).filter((m: any) => m.name === name);
 
   it("creates people with title, birth date and phone; re-import changes nothing", async () => {
     const people = [
@@ -438,7 +438,7 @@ describe("audit fixes: registry dates and pending clean-up", () => {
 
   it("a 1998 ordination and a 1999 status event can be recorded", async () => {
     await sync({ people: [person("P-1", "장로님", { registered_on: "1990-01-01" })] });
-    const m = (await json(await call("GET", "/api/members", { as: EDITOR })))[0];
+    const m = (await json(await call("GET", "/api/members", { as: PASTOR })))[0];
     expect((await call("POST", `/api/registry/members/${m.id}/titles`, { as: PASTOR, body: { title_id: 6, start_date: "1998-05-01" } })).status).toBe(201);
     expect((await call("POST", `/api/registry/members/${m.id}/status`, { as: PASTOR, body: { status_code: "inactive", event_date: "1999-01-01" } })).status).toBe(201);
   });

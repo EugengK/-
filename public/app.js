@@ -172,7 +172,7 @@ function memberChoices() {
     name: m.name,
     // Same name: show what tells them apart (title, birth year, note, relation), id only as a last resort.
     label: byName.get(m.name) > 1
-      ? `${m.name} (${[m.current_title, m.birth_date ? `${m.birth_date.slice(0, 4)}년생` : null, m.note, m.relation].filter(Boolean).join(", ") || `#${m.id}`})`
+      ? `${m.name} (${[m.current_title, (m.birth_year ?? m.birth_date?.slice(0, 4)) ? `${m.birth_year ?? m.birth_date.slice(0, 4)}년생` : null, m.note, m.relation].filter(Boolean).join(", ") || `#${m.id}`})`
       : m.name,
   }));
   const byLabel = new Map();
@@ -837,6 +837,10 @@ const thisYear = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/H
 
 async function renderRegistry() {
   const ticket = newTicket();
+  if (!isRegistryAdmin()) {
+    paint(ticket, h("h2", {}, "교적부"), h("p", { class: "notice" }, "교적부는 담임목사(교적부 관리 권한)만 볼 수 있습니다."));
+    return;
+  }
   const id = Number(location.hash.split("/")[1]);
   if (id) return renderRegistryMember(ticket, id);
 
@@ -1327,7 +1331,7 @@ async function renderSettings() {
   const cards = [
     openingBalanceCard(),
     lookupCard("헌금 종류", "/api/fund-types"),
-    titlesCard(),
+    ...(isRegistryAdmin() ? [titlesCard()] : []), // titles live in the pastor-only 교적부
     lookupCard("부서", "/api/departments"),
     lookupCard("지출 항목", "/api/expense-categories"),
   ];
@@ -1581,6 +1585,7 @@ async function start() {
   document.body.classList.toggle("viewer", !isEditor());
   document.querySelector('.tabs a[data-tab="entry"]').hidden = !isEditor(); // nothing to do there for a viewer
   document.body.classList.toggle("no-registry", !isRegistryAdmin());
+  document.querySelector('.tabs a[data-tab="registry"]').hidden = !isRegistryAdmin(); // pastor only
   document.getElementById("church-name").textContent = state.settings.church_name || "교회 회계";
   document.title = `${state.settings.church_name || "교회"} 회계`;
   document.getElementById("who").textContent = roleText();

@@ -76,6 +76,17 @@ memberRoutes.get("/", async (c) => {
   )
     .bind(...binds)
     .all<Record<string, unknown>>();
+  if (!c.get("user").registry_admin) {
+    // Finance editors only pick givers by name: no birth dates, phones, notes, families or history.
+    // Title and birth year are kept only to tell apart two people with the same name.
+    return c.json(results.map((r) => ({
+      id: r.id,
+      name: r.name,
+      is_active: r.is_active === 1,
+      current_title: r.current_title,
+      birth_year: typeof r.birth_date === "string" ? r.birth_date.slice(0, 4) : null,
+    })));
+  }
   return c.json(results.map((r) => ({ ...r, is_active: r.is_active === 1 })));
 });
 
