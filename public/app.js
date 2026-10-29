@@ -1170,7 +1170,10 @@ function peopleFromCsv(text) {
 function peopleFromRoster(rows) {
   const header = rows[0].map((v) => v.trim());
   const idx = (t) => header.indexOf(t);
-  const c = { kind: idx("구분"), title: idx("직분/학년"), name: idx("성명"), birth: idx("생년월일"), phone: idx("연락처") };
+  const c = {
+    kind: idx("구분"), title: idx("직분/학년"), name: idx("성명"), birth: idx("생년월일"), phone: idx("연락처"),
+    code: idx("교인ID"), family: idx("가정ID"),
+  };
   const get = (r, i) => (i >= 0 ? String(r[i] ?? "").normalize("NFC").trim() : "");
   const blank = (v) => (v === "-" ? "" : v);
   const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Hobart" }).format(new Date());
@@ -1180,12 +1183,17 @@ function peopleFromRoster(rows) {
     if (!name) return;
     if (name.length > 50) { skipped.push(`${i + 2}행(성명)`); return; }
     const kind = blank(get(r, c.kind)), sub = blank(get(r, c.title));
-    const school = kind === "주일학교";
+    // Sunday-school grades (Year 1–12, Kinder, Prep…) are not titles; they go into the note.
+    const school = kind === "주일학교" || /^(year\s*\d{1,2}|kinder|kindy|prep|foundation|유치부|유아부)$/i.test(sub);
     let birth = csvDate(blank(get(r, c.birth)));
     if (birth && (birth < "1900-01-01" || birth > today || !isRealYmd(birth))) birth = null;
     if (!birth && blank(get(r, c.birth))) noBirth.push(`${i + 2}행`);
     const title = school ? "" : sub || kind;
+    const code = blank(get(r, c.code)), family = blank(get(r, c.family));
+    const okCode = (v) => /^[A-Za-z0-9-]{3,40}$/.test(v);
+    if ((code && !okCode(code)) || (family && !okCode(family))) { skipped.push(`${i + 2}행(교인ID·가정ID 형식)`); return; }
     people.push({
+      ...(code ? { member_code: code } : {}), ...(family ? { family_code: family } : {}),
       name, birth_date: birth,
       phone: blank(get(r, c.phone)).slice(0, 30) || null,
       title: title.slice(0, 20) || null,
@@ -1215,8 +1223,9 @@ function importCard(after) {
       if (!f) throw new Error("CSV 파일을 고르세요.");
       const text = await f.text();
       const header = (parseCsv(text)[0] ?? []).map((v) => v.trim());
-      // Two layouts: the 목양 sheet's 교인목록 tab (has 교인ID) or the church roster (has 성명).
-      const isRoster = !header.includes("교인ID") && header.includes("성명");
+      // Two layouts: the church roster (성명 column, with or without 교인ID/가정ID) or the
+      // 목양 sheet's 교인목록 tab (교인ID + 이름).
+      const isRoster = header.includes("성명");
       const { people, skipped, noBirth, used, ignored } = isRoster ? peopleFromRoster(parseCsv(text)) : peopleFromCsv(text);
       if (!people.length) throw new Error("가져올 사람이 없습니다.");
       const kind = isRoster ? "교인명부" : "목양 시트 교인목록";
@@ -1243,7 +1252,7 @@ function importCard(after) {
         skipped.length ? h("div", {}, `형식이 맞지 않아 건너뛴 줄: ${skipped.join(", ")}`) : null,
         noBirth.length ? h("div", {}, `생년월일을 읽지 못한 줄 (나머지는 가져옴): ${noBirth.join(", ")}`) : null,
         total.unknown.size ? h("div", {}, `목록에 없는 직분이라 기록하지 않음: ${[...total.unknown].join(", ")}`) : null,
-        total.ambiguous.length ? h("div", {}, `같은 분인지 확실하지 않아 건너뜀 (교인 상세에서 생년월일을 넣은 뒤 다시 가져오세요): ${total.ambiguous.join(", ")}`) : null,
+        total.ambiguous.length ? h("div", {}, `건너뜀 — 괄호 안의 이유를 고친 뒤 다시 가져오면 이어서 들어갑니다: ${total.ambiguous.join(", ")}`) : null,
       ].filter(Boolean));
       file.value = "";
       toast("가져왔습니다.");
@@ -1251,7 +1260,7 @@ function importCard(after) {
   };
   return h("details", { class: "card registry-only" },
     h("summary", {}, h("b", {}, "교인명부 / 목양 시트에서 가져오기 (CSV)")),
-    h("p", { class: "muted mt" }, "두 가지 CSV를 받습니다. ① 교인명부(구분·직분/학년·성명·생년월일·연락처): 이름과 생년월일로 같은 분을 찾습니다. ② 목양 시트 '교인목록' 탭: 교인ID·가정ID·이름·관계·생년월일·직분·등록일만 읽습니다. 그 밖의 칸(메모·기도제목·주소 등)은 이 화면에서 버려져 서버로 가지 않습니다. 여러 번 가져와도 중복되지 않고, 직분은 처음 한 번만 기록됩니다."),
+    h("p", { class: "muted mt" }, "두 가지 CSV를 받습니다. ① 교인명부(교인ID·가정ID·직분/학년·성명·생년월일·연락처): 교인ID가 있으면 교인ID로, 없으면 이름과 생년월일로 같은 분을 찾습니다. 성별·나이 칸은 읽지 않습니다. ② 목양 시트 '교인목록' 탭: 교인ID·가정ID·이름·관계·생년월일·직분·등록일만 읽습니다. 그 밖의 칸(메모·기도제목·주소 등)은 이 화면에서 버려져 서버로 가지 않습니다. 여러 번 가져와도 중복되지 않고, 직분은 처음 한 번만 기록됩니다."),
     h("div", { class: "row" }, file, h("div", { class: "shrink" }, go)),
     out);
 }

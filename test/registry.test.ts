@@ -459,3 +459,47 @@ describe("audit fixes: registry dates and pending clean-up", () => {
     expect((await call("PATCH", `/api/members/${m.id}`, { as: PASTOR, body: { birth_date: "1990-01-01" } })).status).toBe(200);
   });
 });
+
+describe("church roster with 교인ID and 가정ID", () => {
+  beforeEach(resetDb);
+  const roster = (people: unknown[]) => call("POST", "/api/registry/import-roster", { as: PASTOR, body: { people } });
+  const byName = async () => Object.fromEntries((await json(await call("GET", "/api/members?include_inactive=1", { as: PASTOR }))).map((m: any) => [m.name, m]));
+
+  it("creates people with their IDs and families; the ID decides on re-import", async () => {
+    const r = await json(await roster([
+      { member_code: "P-1", family_code: "F-1", name: "가장로", birth_date: "1958-07-10", phone: "0400 000 001", title: "시무장로" },
+      { member_code: "P-2", family_code: "F-1", name: "가권사", birth_date: "1960-01-01", title: "시무권사" },
+      { member_code: "P-3", family_code: "F-1", name: "가아이", birth_date: "2014-07-28", note: "주일학교 Year 6" },
+      { member_code: "P-4", family_code: "F-2", name: "나성도" }, // no birth date: the ID is enough
+    ]));
+    expect(r).toMatchObject({ created: 4, ambiguous: [] });
+    const m = await byName();
+    expect(m["가장로"]).toMatchObject({ member_code: "P-1", family_code: "F-1", current_title: "장로" });
+    expect(m["가아이"]).toMatchObject({ family_code: "F-1", current_title: null, note: "주일학교 Year 6" });
+    const detail = await json(await call("GET", `/api/registry/members/${m["가장로"].id}`, { as: PASTOR }));
+    expect(detail.family.map((f: any) => f.name).sort()).toEqual(["가권사", "가아이"]);
+    // same file again: nothing changes; a different name under a known ID is refused, not merged
+    expect(await json(await roster([{ member_code: "P-4", family_code: "F-2", name: "나성도" }]))).toMatchObject({ created: 0, unchanged: 1 });
+    const clash = await json(await roster([{ member_code: "P-4", name: "다른사람" }]));
+    expect(clash.created).toBe(0);
+    expect(clash.ambiguous[0]).toContain("P-4");
+  });
+
+  it("skips an ID used twice in one file and links a person who was added before without an ID", async () => {
+    await json(await roster([{ name: "김채우", birth_date: "2013-02-17" }])); // earlier roster, no IDs
+    const r = await json(await roster([
+      { member_code: "P-A02", family_code: "F-A", name: "송은정", birth_date: "1984-12-21" },
+      { member_code: "P-A02", family_code: "F-A", name: "김채우", birth_date: "2013-02-17" },
+      { member_code: "P-A05", family_code: "F-A", name: "김하라", birth_date: "2017-08-16" },
+    ]));
+    expect(r.created).toBe(1); // 김하라 only
+    expect(r.ambiguous).toHaveLength(2); // both rows with the doubled ID
+    expect(r.ambiguous.every((a: string) => a.includes("P-A02"))).toBe(true);
+    // after the file is fixed, the earlier 김채우 gets the ID instead of a duplicate being made
+    const fixed = await json(await roster([{ member_code: "P-A03", family_code: "F-A", name: "김채우", birth_date: "2013-02-17" }]));
+    expect(fixed).toMatchObject({ created: 0, updated: 1 });
+    const m = await byName();
+    expect(m["김채우"]).toMatchObject({ member_code: "P-A03", family_code: "F-A" });
+    expect(Object.keys(m).filter((n) => n === "김채우")).toHaveLength(1);
+  });
+});

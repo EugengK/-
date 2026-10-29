@@ -247,13 +247,16 @@ syncRoutes.post("/", async (c) => {
 // ---------- 교인명부 (roster) ----------
 
 /**
- * The church roster (구분, 직분/학년, 성명, 생년월일, 연락처 …) has no IDs. People are matched by
- * name + birth date; a person with the same name but no birth date on either side is matched only
- * when there is exactly one. Creates people without a 교인ID; the sheet sync links them later
- * (same name and birth date). Never deletes or changes attendance.
+ * The church roster (직분/학년, 성명, 생년월일, 연락처 …, newer ones also 교인ID/가정ID).
+ * With a 교인ID, that ID decides who is who; a 교인ID used twice in one file is skipped. Without
+ * one, people are matched by name + birth date, and a same-name person with no birth date on either
+ * side is matched only when there is exactly one. Never deletes or changes attendance.
  */
 const rosterPersonSchema = z
   .object({
+    // Newer rosters carry the sheet's IDs; they then decide who is who (and the family).
+    member_code: code.nullable().optional(),
+    family_code: code.nullable().optional(),
     name: text(50).pipe(z.string().min(1)),
     birth_date: birthDate.nullable().optional(),
     phone: text(30).nullable().optional(),
@@ -274,31 +277,44 @@ export interface RosterResult {
 
 export async function applyRoster(db: D1Database, actor: AppUser, people: RosterPerson[]): Promise<RosterResult> {
   const [all, titled] = await db.batch([
-    db.prepare("SELECT id, name, birth_date, phone, member_code FROM members"),
+    db.prepare("SELECT id, name, birth_date, phone, member_code, family_code FROM members"),
     db.prepare("SELECT DISTINCT member_id FROM member_titles"),
   ]);
-  const members = all!.results as { id: number; name: string; birth_date: string | null; phone: string | null; member_code: string | null }[];
+  const members = all!.results as {
+    id: number; name: string; birth_date: string | null; phone: string | null; member_code: string | null; family_code: string | null;
+  }[];
   const hasTitle = new Set((titled!.results as { member_id: number }[]).map((t) => t.member_id));
   const resolveTitle = await loadTitles(db);
   const today = todayInHobart();
   const result: RosterResult = { created: 0, updated: 0, unchanged: 0, ambiguous: [], unknown_titles: [] };
   const statements: D1PreparedStatement[] = [];
   const touched = new Set<number>(); // matched earlier in this file
+  const codesInFile = new Map<string, number>();
+  for (const p of people) if (p.member_code) codesInFile.set(p.member_code, (codesInFile.get(p.member_code) ?? 0) + 1);
 
   for (const p of people) {
     if (p.name === "-") continue;
     const birth = p.birth_date ?? null;
     const phone = p.phone || null;
+    const memberCode = p.member_code ?? null;
+    const familyCode = p.family_code ?? null;
     const { title, unknown } = resolveTitle(p.title);
     if (unknown && !result.unknown_titles.includes(unknown)) result.unknown_titles.push(unknown);
 
     // Matching is deliberately conservative: merging two different people would attach one
     // person's giving to another. When in doubt the row is skipped and reported.
     const key = nameKey(p.name);
-    const sameName = members.filter((m) => nameKey(m.name) === key);
+    // People already holding another 교인ID are someone else, whatever their name.
+    const sameName = members.filter((m) => nameKey(m.name) === key && (!memberCode || !m.member_code || m.member_code === memberCode));
     let match: (typeof members)[number] | null = null;
     let why = "";
-    if (birth) {
+    const byCode = memberCode ? members.find((m) => m.member_code === memberCode) : undefined;
+    if (memberCode && (codesInFile.get(memberCode) ?? 0) > 1) {
+      why = `교인ID ${memberCode}가 파일에 두 번 이상`;
+    } else if (byCode) {
+      if (nameKey(byCode.name) === key) match = byCode;
+      else why = `교인ID ${memberCode}는 이미 '${byCode.name}'(으)로 등록됨`;
+    } else if (birth) {
       const exact = sameName.filter((m) => m.birth_date === birth);
       if (exact.length === 1) match = exact[0]!;
       else if (exact.length > 1) why = "같은 이름·생년월일이 여럿";
@@ -319,15 +335,23 @@ export async function applyRoster(db: D1Database, actor: AppUser, people: Roster
     }
     if (match) {
       touched.add(match.id);
-      // Only fills gaps: an existing phone or birth date is never overwritten by the roster.
-      const next = { birth_date: match.birth_date ?? birth, phone: match.phone ?? phone };
-      const changed = next.birth_date !== match.birth_date || next.phone !== match.phone;
+      // Only fills gaps: an existing phone, birth date or ID is never overwritten by the roster.
+      const next = {
+        birth_date: match.birth_date ?? birth,
+        phone: match.phone ?? phone,
+        member_code: match.member_code ?? memberCode,
+        family_code: match.family_code ?? familyCode,
+      };
+      const changed = next.birth_date !== match.birth_date || next.phone !== match.phone
+        || next.member_code !== match.member_code || next.family_code !== match.family_code;
       const addTitle = title && !hasTitle.has(match.id);
       if (changed) {
         statements.push(
-          db.prepare("UPDATE members SET birth_date = ?, phone = ? WHERE id = ?").bind(next.birth_date, next.phone, match.id),
+          db.prepare("UPDATE members SET birth_date = ?, phone = ?, member_code = ?, family_code = ? WHERE id = ?")
+            .bind(next.birth_date, next.phone, next.member_code, next.family_code, match.id),
           auditStatement(db, actor, "update", "members", match.id, match, next),
         );
+        Object.assign(match, next);
       }
       if (addTitle) {
         const year = today.slice(0, 4);
@@ -345,11 +369,12 @@ export async function applyRoster(db: D1Database, actor: AppUser, people: Roster
     }
 
     result.created++;
-    const row = { name: p.name, birth_date: birth, phone, note: p.note || null };
-    members.push({ id: -1, name: p.name, birth_date: birth, phone, member_code: null }); // later rows see it
+    const row = { name: p.name, birth_date: birth, phone, note: p.note || null, member_code: memberCode, family_code: familyCode };
+    members.push({ id: -1, name: p.name, birth_date: birth, phone, member_code: memberCode, family_code: familyCode }); // later rows see it
     const year = today.slice(0, 4);
     statements.push(
-      db.prepare("INSERT INTO members (name, birth_date, phone, note, registered_on) VALUES (?, ?, ?, ?, ?)").bind(row.name, row.birth_date, row.phone, row.note, today),
+      db.prepare("INSERT INTO members (name, birth_date, phone, note, registered_on, member_code, family_code) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .bind(row.name, row.birth_date, row.phone, row.note, today, row.member_code, row.family_code),
       auditStatement(db, actor, "create", "members", "last_insert", undefined, row),
       db
         .prepare("INSERT INTO member_status_events (member_id, status_code, event_date, note, created_by) SELECT MAX(id), 'registered', ?, '교인명부에서 등록', ? FROM members")
