@@ -1,6 +1,7 @@
 declare namespace Cloudflare {
   interface Env {
     DB: D1Database;
+    RECEIPTS: R2Bucket;
     ENVIRONMENT: string;
     ACCESS_TEAM_DOMAIN: string;
     ACCESS_AUD: string;

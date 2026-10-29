@@ -18,6 +18,8 @@
       "migrations_dir": "migrations"
     }
   ],
+  // Receipt photos. Create once with: npx wrangler r2 bucket create church-receipts
+  "r2_buckets": [{ "binding": "RECEIPTS", "bucket_name": "church-receipts" }],
   "vars": {
     // Anything other than "development" disables the local-login shortcut.
     "ENVIRONMENT": "production",

@@ -279,7 +279,8 @@ interface ExpenseRow {
 
 const SELECT = `SELECT e.id, e.expense_date, e.vendor, e.department_id, d.name AS department_name, e.category_id,
   c.name AS category_name, e.total_cents, e.gst_cents, e.account, e.paid_by, e.note, e.status, e.void_reason,
-  e.recurring_id, r.name AS recurring_name, e.scheduled_date, e.created_at
+  e.recurring_id, r.name AS recurring_name, e.scheduled_date, e.created_at,
+  (SELECT COUNT(*) FROM expense_attachments a WHERE a.expense_id = e.id AND a.status = 'active') AS photo_count
   FROM expenses e LEFT JOIN departments d ON d.id = e.department_id LEFT JOIN expense_categories c ON c.id = e.category_id
   LEFT JOIN recurring_expenses r ON r.id = e.recurring_id`;
 

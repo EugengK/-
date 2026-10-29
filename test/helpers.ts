@@ -22,6 +22,7 @@ export async function resetDb() {
     "member_status_events",
     "sync_pending",
     "expense_items",
+    "expense_attachments",
     "expenses",
     "recurring_expenses",
     "offerings",

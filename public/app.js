@@ -627,6 +627,10 @@ async function expenseListView(depts, cats) {
                   [e.department_name, e.category_name].some(Boolean) ? h("div", { class: "muted" }, [e.department_name, e.category_name].filter(Boolean).join(" · ")) : null,
                   e.note ? h("div", { class: "muted" }, e.note) : null),
                 h("td", { class: "num" }, money(e.total_cents),
+                  e.photo_count || isEditor()
+                    ? h("div", {}, h("button", { type: "button", class: "mini", "aria-label": `영수증 사진 ${e.photo_count}장`, onclick: (ev) => showPhotos(ev.currentTarget, e, load) },
+                        e.photo_count ? `📷 ${e.photo_count}` : "📷 +"))
+                    : null,
                   h("div", { class: "editor-only actions" },
                     e.status === "planned" ? h("button", { type: "button", class: "small", onclick: (ev) => payPlanned(ev.currentTarget, e, load) }, "지급") : null,
                     h("button", { type: "button", class: "mini", onclick: (ev) => editExpense(ev.currentTarget, e, depts, cats, load) }, "수정"),
@@ -697,6 +701,136 @@ async function editExpense(btn, e, depts, cats, after) {
   dlg.showModal();
 }
 
+// ---------- 영수증 사진 ----------
+
+/**
+ * Shrinks a phone photo before upload (long edge ≤ 2400px, JPEG): a few hundred KB instead of
+ * several MB, still sharp enough to read a receipt. createImageBitmap applies the photo's rotation.
+ */
+async function shrinkPhoto(file) {
+  let bmp;
+  try {
+    bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+  } catch {
+    // This browser can't decode it (e.g. some HEIC files): send it as it is if the server can take it.
+    if (["image/jpeg", "image/png", "image/webp"].includes(file.type) && file.size <= 10 * 1024 * 1024) return file;
+    throw new Error(`'${file.name}' 사진 형식을 읽을 수 없습니다. 카메라로 다시 찍거나 JPEG 사진을 고르세요.`);
+  }
+  const scale = Math.min(1, 2400 / Math.max(bmp.width, bmp.height));
+  const canvas = h("canvas", { width: Math.round(bmp.width * scale), height: Math.round(bmp.height * scale) });
+  canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+  bmp.close?.();
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.85));
+  if (!blob) throw new Error("사진을 준비하지 못했습니다. 다시 시도하세요.");
+  return blob;
+}
+
+async function uploadPhoto(expenseId, blob) {
+  let res;
+  try {
+    res = await fetch(`/api/expenses/${expenseId}/attachments`, {
+      method: "POST",
+      headers: { "Content-Type": blob.type || "image/jpeg" },
+      body: blob,
+      signal: AbortSignal.timeout(60000),
+    });
+  } catch (err) {
+    throw new Error(err?.name === "TimeoutError" ? "사진을 올리는 데 너무 오래 걸립니다. 연결을 확인하세요." : "서버에 연결할 수 없습니다.");
+  }
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(data?.error ?? `사진을 올리지 못했습니다 (${res.status})`);
+  return data;
+}
+
+/** Shrinks and uploads photos one by one; returns how many went up and the first error, if any. */
+async function uploadPhotos(expenseId, files) {
+  let done = 0;
+  for (const f of files) {
+    try {
+      await uploadPhoto(expenseId, await shrinkPhoto(f));
+      done++;
+    } catch (err) {
+      return { done, error: err.message };
+    }
+  }
+  return { done, error: null };
+}
+
+/**
+ * "Take or choose photos" button with previews. No `capture` attribute on purpose: phones then
+ * offer both the camera and the photo library.
+ */
+function photoPicker() {
+  const input = h("input", { type: "file", accept: "image/*", multiple: true, hidden: true, "aria-label": "영수증 사진" });
+  const thumbs = h("div", { class: "thumbs" });
+  let files = [];
+  const draw = () => {
+    for (const img of thumbs.querySelectorAll("img")) URL.revokeObjectURL(img.src);
+    thumbs.replaceChildren(...files.map((f, i) =>
+      h("div", { class: "thumb" },
+        h("img", { src: URL.createObjectURL(f), alt: `영수증 사진 ${i + 1}` }),
+        h("button", { type: "button", class: "mini danger-text", "aria-label": "사진 빼기", onclick: () => { files.splice(i, 1); draw(); } }, "×"))));
+  };
+  input.onchange = () => {
+    files = [...files, ...input.files].slice(0, 10);
+    input.value = "";
+    draw();
+  };
+  const el = h("div", {},
+    h("button", { type: "button", class: "secondary", onclick: () => input.click() }, "📷 영수증 사진 (찍기·고르기)"),
+    input, thumbs);
+  return { el, files: () => [...files], clear: () => { files = []; draw(); } };
+}
+
+/** Photos of one expense: view (everyone), add or remove with a reason (finance editors). */
+async function showPhotos(btn, e, after) {
+  const dlg = h("dialog", { class: "ask photos" });
+  const body = h("div");
+  const close = () => { dlg.close(); dlg.remove(); act(null, after); }; // refresh the 📷 counts
+  dlg.addEventListener("cancel", (ev) => { ev.preventDefault(); close(); });
+  const load = async () => {
+    const rows = await api("GET", `/api/expenses/${e.id}/attachments`);
+    body.replaceChildren(rows.length
+      ? h("div", { class: "photo-list" }, rows.map((a, i) =>
+          h("figure", {},
+            // Tap to open the full-size photo in its own tab (pinch to zoom there).
+            h("a", { href: `/api/attachments/${a.id}`, target: "_blank", rel: "noopener" },
+              h("img", { src: `/api/attachments/${a.id}`, alt: `영수증 사진 ${i + 1}`, loading: "lazy" })),
+            h("figcaption", { class: "muted" }, `${a.created_at.slice(0, 10)} · ${a.created_by_name ?? ""} · ${Math.round(a.size_bytes / 1024)}KB `,
+              isEditor() ? h("button", { type: "button", class: "mini danger-text", onclick: async (ev) => {
+                const b = ev.currentTarget;
+                const why = await ask("이 사진을 지울까요? (기록에는 남습니다)\n사유:", { input: "", okText: "지우기" });
+                if (why === null) return;
+                await act(b, async () => {
+                  if (!why.trim()) throw new Error("사유를 입력하세요.");
+                  await api("POST", `/api/attachments/${a.id}/void`, { reason: why });
+                  toast("사진을 지웠습니다.");
+                  await load();
+                });
+              } }, "지우기") : null))))
+      : h("p", { class: "muted" }, "붙은 사진이 없습니다."));
+  };
+  const picker = isEditor() ? photoPicker() : null;
+  const add = h("button", { type: "button" }, "사진 올리기");
+  add.onclick = () => act(add, async () => {
+    const files = picker.files();
+    if (!files.length) throw new Error("먼저 사진을 찍거나 고르세요.");
+    const r = await uploadPhotos(e.id, files);
+    picker.clear();
+    await load();
+    if (r.error) throw new Error(`${r.done}장 올림, 나머지는 실패: ${r.error}`);
+    toast(`사진 ${r.done}장을 올렸습니다.`);
+  });
+  dlg.append(
+    h("h3", {}, `영수증 사진 · ${e.recurring_name ?? e.vendor} ${money(e.total_cents)}`),
+    body,
+    picker && e.status !== "void" ? h("div", { class: "mt" }, picker.el, h("div", { class: "mt" }, add)) : null,
+    h("div", { class: "row mt" }, h("button", { type: "button", class: "secondary", onclick: close }, "닫기")));
+  document.body.append(dlg);
+  dlg.showModal();
+  await act(btn, load);
+}
+
 /** 지출 입력: a one-off expense. */
 function expenseEntryCard(depts, cats) {
   const optSel = (label, rows) => h("select", { "aria-label": label }, h("option", { value: "" }, `${label} (선택)`), rows.map((x) => h("option", { value: x.id }, x.name)));
@@ -706,6 +840,7 @@ function expenseEntryCard(depts, cats) {
   const eAccount = h("select", { "aria-label": "계정" }, h("option", { value: "cash" }, "현금"), h("option", { value: "bank" }, "은행"));
   const eDept = optSel("부서", depts), eCat = optSel("지출 항목", cats);
   const eNote = h("input", { placeholder: "메모 (선택)", maxlength: 300 });
+  const ePhotos = photoPicker();
   const eSave = h("button", { type: "button" }, "지출 저장");
   let clientKey = crypto.randomUUID();
   let sentSig = null;
@@ -714,7 +849,9 @@ function expenseEntryCard(depts, cats) {
       const cents = toCents(eAmount.value);
       if (cents === null || cents <= 0) throw new Error("금액이 올바르지 않습니다. (예: 45.50)");
       if (!eVendor.value.trim()) throw new Error("지급처 / 내용을 입력하세요.");
-      if (!(await ask(`${eDate.value} ${eVendor.value.trim()} ${money(cents)} 지출을 저장할까요?`, { okText: "저장" }))) return;
+      const photos = ePhotos.files();
+      const withPhotos = photos.length ? `\n영수증 사진 ${photos.length}장도 함께 올립니다.` : "";
+      if (!(await ask(`${eDate.value} ${eVendor.value.trim()} ${money(cents)} 지출을 저장할까요?${withPhotos}`, { okText: "저장" }))) return;
       const body = {
         expense_date: eDate.value, vendor: eVendor.value, total_cents: cents, account: eAccount.value,
         department_id: eDept.value ? Number(eDept.value) : null, category_id: eCat.value ? Number(eCat.value) : null, note: eNote.value || undefined,
@@ -723,19 +860,27 @@ function expenseEntryCard(depts, cats) {
       const sig = JSON.stringify(body);
       if (sentSig !== null && sentSig !== sig) clientKey = crypto.randomUUID();
       sentSig = sig;
-      await api("POST", "/api/expenses", { ...body, client_key: clientKey });
+      const saved = await api("POST", "/api/expenses", { ...body, client_key: clientKey });
       clientKey = crypto.randomUUID();
       sentSig = null;
       eVendor.value = eAmount.value = eNote.value = "";
-      toast("지출을 저장했습니다. '지출 내역'에서 볼 수 있습니다.");
+      ePhotos.clear();
+      if (photos.length) {
+        const r = await uploadPhotos(saved.id, photos);
+        if (r.error) {
+          // The expense itself is saved; say exactly what is missing and where to fix it.
+          throw new Error(`지출은 저장했지만 사진은 ${r.done}/${photos.length}장만 올라갔습니다 (${r.error}). '지출 내역'에서 그 지출의 📷를 눌러 다시 올리세요.`);
+        }
+      }
+      toast(`지출을 저장했습니다${photos.length ? ` (사진 ${photos.length}장)` : ""}. '지출 내역'에서 볼 수 있습니다.`);
     });
   return h("div", { class: "card" },
     h("h3", {}, "지출 입력"),
     h("div", { class: "grid" },
       h("div", { class: "row" }, h("div", {}, h("label", {}, "날짜"), eDate), h("div", {}, h("label", {}, "금액 ($)"), eAmount), h("div", {}, h("label", {}, "계정"), eAccount)),
       h("div", {}, h("label", {}, "지급처 / 내용"), eVendor),
-      h("div", { class: "row" }, eDept, eCat), eNote, eSave),
-    h("p", { class: "muted mt" }, "영수증 사진으로 입력하는 기능은 다음 단계에서 추가됩니다."));
+      h("div", { class: "row" }, eDept, eCat), eNote, ePhotos.el, eSave),
+    h("p", { class: "muted mt" }, "영수증 사진은 원본 대신 읽기 좋은 크기로 줄여서 올립니다. 사진 속 글자를 읽어 자동으로 채우는 기능은 다음 단계에서 추가됩니다."));
 }
 
 function recurringCard(depts, cats, afterChange) {

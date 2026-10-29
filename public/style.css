@@ -79,3 +79,12 @@ td.num .tag, td .tag { white-space: nowrap; }
 button.mini { min-height: 36px; padding: 4px 10px; }
 tr.strong-row td { font-weight: 700; background: var(--brand-soft); }
 label.check { display: flex; align-items: center; gap: 8px; margin: 0; font-weight: 400; cursor: pointer; }
+.thumbs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.thumb { position: relative; }
+.thumb img { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); display: block; }
+.thumb button { position: absolute; top: -6px; right: -6px; min-height: 24px; width: 24px; padding: 0; border-radius: 999px; background: #fff; }
+dialog.photos { width: min(560px, calc(100vw - 32px)); }
+.photo-list { display: grid; gap: 12px; max-height: 60vh; overflow-y: auto; }
+.photo-list figure { margin: 0; }
+.photo-list img { width: 100%; border-radius: 8px; border: 1px solid var(--line); display: block; }
+.photo-list figcaption { margin-top: 4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

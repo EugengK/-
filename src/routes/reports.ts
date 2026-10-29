@@ -171,7 +171,8 @@ reportRoutes.get("/expenses.csv", async (c) => {
   const { from, to } = period((k) => c.req.query(k));
   const { results } = await c.env.DB.prepare(
     `SELECT e.expense_date, e.scheduled_date, e.vendor, r.name AS recurring, d.name AS dept, cat.name AS category, e.account,
-            e.total_cents, e.gst_cents, e.status, e.void_reason, e.note, e.created_at
+            e.total_cents, e.gst_cents, e.status, e.void_reason, e.note, e.created_at,
+            (SELECT COUNT(*) FROM expense_attachments a WHERE a.expense_id = e.id AND a.status = 'active') AS photos
      FROM expenses e LEFT JOIN recurring_expenses r ON r.id = e.recurring_id LEFT JOIN departments d ON d.id = e.department_id
      LEFT JOIN expense_categories cat ON cat.id = e.category_id
      WHERE e.expense_date BETWEEN ? AND ? ORDER BY e.expense_date, e.id`,
@@ -179,11 +180,11 @@ reportRoutes.get("/expenses.csv", async (c) => {
     .bind(from, to)
     .all<Record<string, any>>();
   return csv(`expenses_${from}_${to}.csv`, [
-    ["날짜", "고정지출 예정일", "지급처/내용", "고정 지출", "부서", "지출 항목", "계정", "금액(AUD)", "GST(AUD)", "합계에 포함", "상태", "취소 사유", "메모", "입력 시각(UTC)"],
+    ["날짜", "고정지출 예정일", "지급처/내용", "고정 지출", "부서", "지출 항목", "계정", "금액(AUD)", "GST(AUD)", "합계에 포함", "상태", "취소 사유", "메모", "영수증 사진(장)", "입력 시각(UTC)"],
     ...results.map((r) => [
       r.expense_date, r.scheduled_date, r.vendor, r.recurring, r.dept, r.category, ACCOUNT[r.account] ?? r.account,
       dollars(r.total_cents), dollars(r.gst_cents), r.status === "confirmed" ? dollars(r.total_cents) : 0,
-      EXP_STATUS[r.status] ?? r.status, r.void_reason, r.note, r.created_at,
+      EXP_STATUS[r.status] ?? r.status, r.void_reason, r.note, r.photos, r.created_at,
     ]),
   ]);
 });

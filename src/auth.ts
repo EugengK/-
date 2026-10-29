@@ -1,5 +1,6 @@
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
 import type { MiddlewareHandler } from "hono";
+import { isPhotoUpload, PHOTO_TYPES } from "./routes/attachments";
 import type { AppEnv, AppUser, Env, TokenVerifier } from "./types";
 
 const ACCESS_HEADER = "Cf-Access-Jwt-Assertion";
@@ -118,7 +119,10 @@ export const guardWrites: MiddlewareHandler<AppEnv> = async (c, next) => {
     return c.json({ error: "허용되지 않은 요청 출처입니다." }, 403);
   }
   const type = (c.req.header("Content-Type") ?? "").split(";")[0]!.trim().toLowerCase();
-  if (type !== "application/json") {
+  // A receipt photo is sent as the image itself. Like JSON, an image type can't come from a plain
+  // cross-site form (it forces a CORS preflight), so CSRF protection is the same.
+  const photo = isPhotoUpload(c.req.path) && PHOTO_TYPES.has(type);
+  if (type !== "application/json" && !photo) {
     return c.json({ error: "JSON 형식으로 요청해야 합니다." }, 415);
   }
   return next();

@@ -11,6 +11,8 @@ export interface AppUser {
 
 export interface Env {
   DB: D1Database;
+  /** Receipt photos (R2). */
+  RECEIPTS: R2Bucket;
   ENVIRONMENT: string;
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;
