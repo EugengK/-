@@ -72,11 +72,22 @@ describe("CSV exports", () => {
     await seed();
     const t = await text("/api/reports/offerings.csv?from=2026-10-01&to=2026-12-31");
     const lines = t.trim().split("\r\n");
-    expect(lines[0]).toBe("날짜,헌금 종류,방식,성도,교인ID,금액(AUD),합계에 포함,상태,취소 사유,메모,입력 시각(UTC)");
+    expect(lines[0]).toBe("날짜,헌금 종류,방식,구분,성도,교인ID,방문자 출신,금액(AUD),합계에 포함,상태,취소 사유,메모,입력 시각(UTC)");
     expect(lines).toHaveLength(5); // header + 4 offerings
+    expect(lines.filter((l) => l.includes(",무기명,(무기명),"))).toHaveLength(4);
     const voided = lines.find((l) => l.includes("오입력"))!;
     expect(voided).toContain(",999,0,취소,오입력,");
     expect(voided).toContain(`"'=HYPERLINK(""x"")"`); // formula neutralised, quotes escaped
+  });
+
+  it("offerings: visitors show as 방문자 with where they came from", async () => {
+    await call("POST", "/api/offerings", { as: EDITOR, body: { offering_date: "2026-11-01", entries: [
+      { fund_type_id: 1, amount_cents: 5000, method: "cash", visitor_name: "홍길동", visitor_from: "론세스턴" },
+      { fund_type_id: 1, amount_cents: 2000, method: "cash", visitor_from: "한국" },
+    ] } });
+    const lines = (await text("/api/reports/offerings.csv?from=2026-11-01&to=2026-11-01")).trim().split("\r\n");
+    expect(lines[1]).toContain(",방문자,홍길동,,론세스턴,50,50,정상,");
+    expect(lines[2]).toContain(",방문자,(무기명),,한국,20,20,정상,");
   });
 
   it("expenses: commas quoted, GST and status columns", async () => {

@@ -208,6 +208,20 @@ function lineEditor(onChange, choices) {
   // Type a few letters and pick from the list; left blank = anonymous (confirmed on save).
   const member = h("input", { list: "giver-list", placeholder: "이름 입력 (비우면 무기명)", "aria-label": "성도", autocomplete: "off" });
   const note = h("input", { placeholder: "메모 (선택)", "aria-label": "메모", maxlength: 300 });
+  // A visitor who is not in the 교적부 (from Launceston, Sydney, Korea…): name and/or where from, both optional.
+  const visitor = h("input", { type: "checkbox", style: "width:auto;min-height:0", "aria-label": "교인이 아닌 방문자" });
+  const visitorName = h("input", { placeholder: "이름 (선택)", "aria-label": "방문자 이름", maxlength: 50 });
+  const visitorFrom = h("input", { list: "visitor-from-list", placeholder: "어디서 (예: 시드니, 한국)", "aria-label": "방문자 출신", maxlength: 50, autocomplete: "off" });
+  const visitorBox = h("div", { class: "row", hidden: true }, h("div", {}, visitorName), h("div", {}, visitorFrom));
+  visitor.onchange = () => {
+    visitorBox.hidden = !visitor.checked;
+    member.disabled = visitor.checked;
+    member.placeholder = visitor.checked ? "아래 방문자 칸에 적습니다" : "이름 입력 (비우면 무기명)";
+    if (visitor.checked) {
+      member.value = "";
+      visitorName.focus();
+    }
+  };
   const cashBtn = h("button", { type: "button", class: "on" }, "현금");
   const onlineBtn = h("button", { type: "button" }, "온라인");
   const setMethod = (m) => {
@@ -229,6 +243,8 @@ function lineEditor(onChange, choices) {
       { class: "grid" },
       h("div", { class: "row" }, h("div", {}, h("label", {}, "종류"), fund), h("div", {}, h("label", {}, "금액 ($)"), amount)),
       h("div", { class: "row" }, h("div", {}, h("label", {}, "방식"), h("div", { class: "seg" }, cashBtn, onlineBtn)), h("div", {}, h("label", {}, "성도"), member)),
+      h("label", { class: "check" }, visitor, " 교인이 아닌 방문자"),
+      visitorBox,
       note,
     ),
   );
@@ -238,13 +254,21 @@ function lineEditor(onChange, choices) {
     focus: () => amount.focus(),
     cents: () => toCents(amount.value),
     isBlank: () => amount.value.trim() === "",
-    giver: () => resolveGiver(member.value, choices),
-    focusGiver: () => member.focus(),
+    giver: () => {
+      if (!visitor.checked) return resolveGiver(member.value, choices);
+      if (!visitorName.value.trim() && !visitorFrom.value.trim()) {
+        return { error: "방문자의 이름이나 어디서 오셨는지 중 하나는 적어 주세요. (모르면 '방문자' 체크를 끄면 무기명으로 저장됩니다.)" };
+      }
+      return { id: null, visitor: true };
+    },
+    focusGiver: () => (visitor.checked ? visitorName.focus() : member.focus()),
     value: () => ({
       fund_type_id: Number(fund.value),
       amount_cents: toCents(amount.value),
       method: line.method,
-      member_id: resolveGiver(member.value, choices).id ?? null,
+      member_id: visitor.checked ? null : resolveGiver(member.value, choices).id ?? null,
+      visitor_name: visitor.checked ? visitorName.value.trim() || undefined : undefined,
+      visitor_from: visitor.checked ? visitorFrom.value.trim() || undefined : undefined,
       note: note.value.trim() || undefined,
     }),
   });
@@ -287,6 +311,8 @@ async function renderEntry(keepDate) {
   };
   const choices = memberChoices();
   const giverList = h("datalist", { id: "giver-list" }, choices.map((c) => h("option", { value: c.label })));
+  const visitorFromList = h("datalist", { id: "visitor-from-list" },
+    ["론세스턴", "데본포트", "버니", "멜버른", "시드니", "브리즈번", "애들레이드", "퍼스", "캔버라", "뉴질랜드", "한국", "미국"].map((v) => h("option", { value: v })));
   const addLine = () => {
     const l = lineEditor(recalc, choices);
     l.removeBtn.onclick = () => {
@@ -316,7 +342,7 @@ async function renderEntry(keepDate) {
           l.focusGiver();
           throw new Error(`${i + 1}번째 줄: ${g.error}`);
         }
-        if (g.id === null) anonymous.push(i);
+        if (g.id === null && !g.visitor) anonymous.push(i);
       }
       // One dialog: the totals, plus a clear warning line when some lines have no giver.
       const entries = filled.map((l) => l.value());
@@ -344,6 +370,7 @@ async function renderEntry(keepDate) {
   paint(ticket, 
     h("h2", {}, "헌금 입력"),
     giverList,
+    visitorFromList,
     h("div", { class: "card" }, h("label", {}, "날짜"), date),
     list,
     h("button", { type: "button", class: "secondary", onclick: () => addLine().focus() }, "+ 줄 추가"),
@@ -414,7 +441,9 @@ async function renderOfferings() {
               h("tbody", {}, rows.map((o) =>
                 h("tr", { class: o.status === "void" ? "void-row" : "" },
                   h("td", {}, o.offering_date, h("br"), h("span", { class: "muted" }, o.fund_type_name)),
-                  h("td", {}, o.member_name ?? "(무기명)", " ", methodTag(o.method),
+                  h("td", {}, o.member_name ?? (o.visitor_name || o.visitor_from
+                    ? [h("span", { class: "tag" }, "방문"), " ", [o.visitor_name, o.visitor_from && `(${o.visitor_from})`].filter(Boolean).join(" ")]
+                    : "(무기명)"), " ", methodTag(o.method),
                     o.note ? h("div", { class: "muted" }, o.note) : null,
                     o.status === "void" ? h("div", {}, h("span", { class: "tag void" }, "취소됨"), " ", o.void_reason) : null),
                   h("td", { class: "num" }, money(o.amount_cents),

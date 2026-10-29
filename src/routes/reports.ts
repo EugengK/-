@@ -149,16 +149,19 @@ const EXP_STATUS: Record<string, string> = { confirmed: "지급", planned: "예�
 reportRoutes.get("/offerings.csv", async (c) => {
   const { from, to } = period((k) => c.req.query(k));
   const { results } = await c.env.DB.prepare(
-    `SELECT o.offering_date, f.name AS fund, o.method, m.name AS member, m.member_code, o.amount_cents, o.status, o.void_reason, o.note, o.created_at
+    `SELECT o.offering_date, f.name AS fund, o.method, m.name AS member, m.member_code, o.visitor_name, o.visitor_from,
+            o.amount_cents, o.status, o.void_reason, o.note, o.created_at
      FROM offerings o JOIN fund_types f ON f.id = o.fund_type_id LEFT JOIN members m ON m.id = o.member_id
      WHERE o.offering_date BETWEEN ? AND ? ORDER BY o.offering_date, o.id`,
   )
     .bind(from, to)
     .all<Record<string, any>>();
   return csv(`offerings_${from}_${to}.csv`, [
-    ["날짜", "헌금 종류", "방식", "성도", "교인ID", "금액(AUD)", "합계에 포함", "상태", "취소 사유", "메모", "입력 시각(UTC)"],
+    ["날짜", "헌금 종류", "방식", "구분", "성도", "교인ID", "방문자 출신", "금액(AUD)", "합계에 포함", "상태", "취소 사유", "메모", "입력 시각(UTC)"],
     ...results.map((r) => [
-      r.offering_date, r.fund, METHOD[r.method] ?? r.method, r.member ?? "(무기명)", r.member_code, dollars(r.amount_cents),
+      r.offering_date, r.fund, METHOD[r.method] ?? r.method,
+      r.member ? "교인" : r.visitor_name || r.visitor_from ? "방문자" : "무기명",
+      r.member ?? r.visitor_name ?? "(무기명)", r.member_code, r.visitor_from, dollars(r.amount_cents),
       r.status === "active" ? dollars(r.amount_cents) : 0, r.status === "active" ? "정상" : "취소", r.void_reason, r.note, r.created_at,
     ]),
   ]);

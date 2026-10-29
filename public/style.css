@@ -78,3 +78,4 @@ tr.planned-row td { color: #5b6270; font-style: italic; }
 td.num .tag, td .tag { white-space: nowrap; }
 button.mini { min-height: 36px; padding: 4px 10px; }
 tr.strong-row td { font-weight: 700; background: var(--brand-soft); }
+label.check { display: flex; align-items: center; gap: 8px; margin: 0; font-weight: 400; cursor: pointer; }

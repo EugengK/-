@@ -14,6 +14,8 @@ interface OfferingRow {
   method: "cash" | "online";
   member_id: number | null;
   member_name: string | null;
+  visitor_name: string | null;
+  visitor_from: string | null;
   note: string | null;
   status: "active" | "void";
   void_reason: string | null;
@@ -22,7 +24,7 @@ interface OfferingRow {
 }
 
 const SELECT = `SELECT o.id, o.offering_date, o.fund_type_id, f.name AS fund_type_name, o.amount_cents, o.method,
-  o.member_id, m.name AS member_name, o.note, o.status, o.void_reason, o.created_by, o.created_at
+  o.member_id, m.name AS member_name, o.visitor_name, o.visitor_from, o.note, o.status, o.void_reason, o.created_by, o.created_at
   FROM offerings o JOIN fund_types f ON f.id = o.fund_type_id LEFT JOIN members m ON m.id = o.member_id`;
 
 // 3 statements per line; keeps one request well under D1's per-request query limit on the paid plan.
@@ -35,9 +37,15 @@ const entrySchema = z
     amount_cents: z.number().int("센트 단위 정수여야 합니다.").positive("금액은 0보다 커야 합니다.").max(1_000_000_000),
     method: z.enum(["cash", "online"]),
     member_id: z.number().int().positive().nullable().optional(),
+    // A visitor who is not in the 교적부: their name and/or where they came from, as they wrote it.
+    visitor_name: optionalText(50),
+    visitor_from: optionalText(50),
     note: optionalText(300),
   })
-  .strict();
+  .strict()
+  .refine((e) => e.member_id == null || (e.visitor_name == null && e.visitor_from == null), {
+    message: "성도로 고른 줄에는 방문자 정보를 넣을 수 없습니다.",
+  });
 
 const createSchema = z
   .object({
@@ -163,15 +171,17 @@ offeringRoutes.post("/", async (c) => {
       amount_cents: e.amount_cents,
       method: e.method,
       member_id: e.member_id ?? null,
+      visitor_name: e.visitor_name ?? null,
+      visitor_from: e.visitor_from ?? null,
       note: e.note ?? null,
     };
     statements.push(
       db
         .prepare(
-          `INSERT INTO offerings (offering_date, fund_type_id, amount_cents, method, member_id, note, created_by, batch_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO offerings (offering_date, fund_type_id, amount_cents, method, member_id, visitor_name, visitor_from, note, created_by, batch_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .bind(row.offering_date, row.fund_type_id, row.amount_cents, row.method, row.member_id, row.note, user.id, key),
+        .bind(row.offering_date, row.fund_type_id, row.amount_cents, row.method, row.member_id, row.visitor_name, row.visitor_from, row.note, user.id, key),
       // Before the audit INSERT, which moves last_insert_rowid() on.
       db.prepare(`${SELECT} WHERE o.id = last_insert_rowid()`),
       auditStatement(db, user, "create", "offerings", "last_insert", undefined, row),

@@ -19,7 +19,7 @@ Cloudflare Workers + D1 기반 백엔드. 현재 구현: DB 구조, 로그인·�
 | `/api/registry/*` | 직분 목록, 직분 이력, 출석 상태 이력, 교인 상세(가족·연도별 헌금), 임기 만료 예정, 시트 연동 확인 대기 | 교적부 관리(목사) |
 | `POST /api/registry/sync` | 목양 시트 → 교적부 (일곱 칸만, 토큰 인증) | 시트 스크립트 |
 | `POST /api/registry/import` | 같은 내용을 CSV 가져오기 화면에서 | 교적부 관리(목사) |
-| `/api/offerings` | 헌금 (한 번에 여러 줄 저장, 기간·종류·성도·방식 조회, 취소) | 기록 담당 |
+| `/api/offerings` | 헌금 (한 번에 여러 줄 저장, 기간·종류·성도·방식 조회, 취소). 교인이 아닌 방문자는 `visitor_name`·`visitor_from`(둘 다 선택)으로 기록 | 기록 담당 |
 | `GET /api/offerings/summary` | 종류별·현금/온라인별 합계 (`member_id`로 개인별 합계) | - |
 | `/api/expenses`, `/api/recurring-expenses` | 지출 (입력·수정·지급·취소), 고정 지출(사례비·렌트 등)과 이번 주 알림 | 기록 담당 |
 | `GET /api/reports/summary?from=&to=` | 기간 보고: 현금/은행 기간 시작·끝 잔액, 수입(헌금 종류별), 지출(부서별·항목별), 미지급 고정 지출 | - |

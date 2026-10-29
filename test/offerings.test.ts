@@ -95,6 +95,28 @@ describe("offerings", () => {
     expect(log.results.map((r) => r.row_id)).toEqual(rows.map((r: any) => r.id));
   });
 
+  it("records visitors who are not members: name and/or where from, never mixed with a member", async () => {
+    const m = await member("김철수");
+    const post = (entries: unknown[]) => call("POST", "/api/offerings", { as: EDITOR, body: { offering_date: "2026-11-01", entries } });
+    const r = await post([
+      { fund_type_id: 1, amount_cents: 5000, method: "cash", visitor_name: " 홍길동 ", visitor_from: "시드니" },
+      { fund_type_id: 1, amount_cents: 1000, method: "online", visitor_from: "한국" },
+    ]);
+    expect(r.status).toBe(201);
+    const saved = await json(r);
+    expect(saved[0]).toMatchObject({ member_id: null, member_name: null, visitor_name: "홍길동", visitor_from: "시드니" });
+    expect(saved[1]).toMatchObject({ visitor_name: null, visitor_from: "한국" });
+    const list = await json(await call("GET", "/api/offerings?from=2026-11-01&to=2026-11-01", { as: PASTOR }));
+    expect(list.map((o: any) => o.visitor_from).sort()).toEqual(["시드니", "한국"]);
+    // a member line cannot also carry visitor details; overly long text is refused
+    expect((await post([{ fund_type_id: 1, amount_cents: 100, method: "cash", member_id: m.id, visitor_from: "시드니" }])).status).toBe(400);
+    expect((await post([{ fund_type_id: 1, amount_cents: 100, method: "cash", visitor_name: "가".repeat(51) }])).status).toBe(400);
+    expect(await count("SELECT COUNT(*) AS n FROM offerings")).toBe(2);
+    // the change log keeps who/where
+    const log = await json(await call("GET", "/api/audit-log?limit=5", { as: EDITOR }));
+    expect(log.some((a: any) => a.after?.visitor_from === "시드니")).toBe(true);
+  });
+
   it("is all-or-nothing: one bad line writes nothing", async () => {
     await call("PATCH", "/api/fund-types/5", { as: EDITOR, body: { is_active: false } });
     const before = await count("SELECT COUNT(*) AS n FROM audit_log");
