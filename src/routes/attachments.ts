@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { auditStatement } from "../audit";
+import { ReaderFailed, ReaderUnavailable, type ReceiptReader } from "../ocr";
 import type { AppEnv } from "../types";
 import { parseBody, reason } from "../validation";
 
@@ -15,8 +16,8 @@ const MAX_PHOTOS_PER_EXPENSE = 10;
 export const PHOTO_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
 
-/** The upload path is the one write that carries an image instead of JSON (see guardWrites). */
-export const isPhotoUpload = (path: string) => /^\/api\/expenses\/[0-9]+\/attachments$/.test(path);
+/** The two writes that carry an image instead of JSON (see guardWrites). */
+export const isPhotoUpload = (path: string) => /^\/api\/expenses\/[0-9]+\/attachments$/.test(path) || path === "/api/receipts/read";
 
 function sniff(b: Uint8Array): string | null {
   if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
@@ -29,18 +30,43 @@ function sniff(b: Uint8Array): string | null {
 const COLUMNS = `a.id, a.expense_id, a.content_type, a.size_bytes, a.status, a.void_reason, a.created_at, u.name AS created_by_name`;
 const FROM = "FROM expense_attachments a LEFT JOIN users u ON u.id = a.created_by";
 
-export const attachmentRoutes = new Hono<AppEnv>();
-
-attachmentRoutes.post("/expenses/:id{[0-9]+}/attachments", async (c) => {
-  const id = Number(c.req.param("id"));
-  if (Number(c.req.header("Content-Length") ?? 0) > MAX_PHOTO_BYTES) {
+/** The image in the request body, checked: size, and a real JPEG/PNG/WEBP by its first bytes. */
+async function photoFrom(req: { header: (k: string) => string | undefined; arrayBuffer: () => Promise<ArrayBuffer> }) {
+  if (Number(req.header("Content-Length") ?? 0) > MAX_PHOTO_BYTES) {
     throw new HTTPException(413, { message: "사진이 너무 큽니다 (10MB까지)." });
   }
-  const bytes = new Uint8Array(await c.req.arrayBuffer());
+  const bytes = new Uint8Array(await req.arrayBuffer());
   if (!bytes.length) throw new HTTPException(400, { message: "사진이 비어 있습니다." });
   if (bytes.length > MAX_PHOTO_BYTES) throw new HTTPException(413, { message: "사진이 너무 큽니다 (10MB까지)." });
   const type = sniff(bytes);
   if (!type) throw new HTTPException(415, { message: "JPEG·PNG·WEBP 사진만 올릴 수 있습니다." });
+  return { bytes, type };
+}
+
+export function attachmentRoutes(readReceipt: ReceiptReader) {
+const attachmentRoutes = new Hono<AppEnv>();
+
+/**
+ * Reads a receipt photo (store, date, total, GST, items) so the expense form can be filled in.
+ * Nothing is saved here: the person checks the values and saves the expense as usual.
+ */
+attachmentRoutes.post("/receipts/read", async (c) => {
+  const { bytes, type } = await photoFrom(c.req);
+  try {
+    return c.json(await readReceipt(c.env, bytes, type));
+  } catch (err) {
+    if (err instanceof ReaderUnavailable) throw new HTTPException(503, { message: err.message });
+    if (err instanceof ReaderFailed) {
+      console.error("receipt read failed", err.message);
+      throw new HTTPException(502, { message: "영수증을 자동으로 읽지 못했습니다. 금액을 직접 입력하세요." });
+    }
+    throw err;
+  }
+});
+
+attachmentRoutes.post("/expenses/:id{[0-9]+}/attachments", async (c) => {
+  const id = Number(c.req.param("id"));
+  const { bytes, type } = await photoFrom(c.req);
 
   const db = c.env.DB;
   const expense = await db
@@ -119,3 +145,6 @@ attachmentRoutes.post("/attachments/:id{[0-9]+}/void", async (c) => {
   if (u!.meta.changes === 0) throw new HTTPException(409, { message: "이미 지운 사진입니다." });
   return c.json({ ok: true });
 });
+
+return attachmentRoutes;
+}

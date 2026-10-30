@@ -736,22 +736,25 @@ async function shrinkPhoto(file) {
   return blob;
 }
 
-async function uploadPhoto(expenseId, blob) {
+/** Sends an image as the request body (the server checks it is a real photo). */
+async function postImage(path, blob, failText) {
   let res;
   try {
-    res = await fetch(`/api/expenses/${expenseId}/attachments`, {
+    res = await fetch(path, {
       method: "POST",
       headers: { "Content-Type": blob.type || "image/jpeg" },
       body: blob,
       signal: AbortSignal.timeout(60000),
     });
   } catch (err) {
-    throw new Error(err?.name === "TimeoutError" ? "사진을 올리는 데 너무 오래 걸립니다. 연결을 확인하세요." : "서버에 연결할 수 없습니다.");
+    throw new Error(err?.name === "TimeoutError" ? "너무 오래 걸립니다. 연결을 확인하세요." : "서버에 연결할 수 없습니다.");
   }
   const data = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(data?.error ?? `사진을 올리지 못했습니다 (${res.status})`);
+  if (!res.ok) throw Object.assign(new Error(data?.error ?? `${failText} (${res.status})`), { status: res.status });
   return data;
 }
+
+const uploadPhoto = (expenseId, blob) => postImage(`/api/expenses/${expenseId}/attachments`, blob, "사진을 올리지 못했습니다");
 
 /** Shrinks and uploads photos one by one; returns how many went up and the first error, if any. */
 async function uploadPhotos(expenseId, files) {
@@ -771,7 +774,8 @@ async function uploadPhotos(expenseId, files) {
  * "Take or choose photos" button with previews. No `capture` attribute on purpose: phones then
  * offer both the camera and the photo library.
  */
-function photoPicker() {
+/** onAdd(files): called with the photos just added (e.g. to read the first receipt). */
+function photoPicker({ onAdd } = {}) {
   const input = h("input", { type: "file", accept: "image/*", multiple: true, hidden: true, "aria-label": "영수증 사진" });
   const thumbs = h("div", { class: "thumbs" });
   let files = [];
@@ -783,9 +787,11 @@ function photoPicker() {
         h("button", { type: "button", class: "mini danger-text", "aria-label": "사진 빼기", onclick: () => { files.splice(i, 1); draw(); } }, "×"))));
   };
   input.onchange = () => {
-    files = [...files, ...input.files].slice(0, 10);
+    const added = [...input.files];
+    files = [...files, ...added].slice(0, 10);
     input.value = "";
     draw();
+    if (added.length) onAdd?.(added);
   };
   const el = h("div", {},
     h("button", { type: "button", class: "secondary", onclick: () => input.click() }, "📷 영수증 사진 (찍기·고르기)"),
@@ -850,8 +856,38 @@ function expenseEntryCard(depts, cats) {
   const eAmount = h("input", { inputmode: "decimal", placeholder: "0.00", "aria-label": "금액" });
   const eAccount = h("select", { "aria-label": "계정" }, h("option", { value: "cash" }, "현금"), h("option", { value: "bank" }, "은행"));
   const eDept = optSel("부서", depts), eCat = optSel("지출 항목", cats);
+  const eGst = h("input", { inputmode: "decimal", placeholder: "0.00", "aria-label": "GST" });
   const eNote = h("input", { placeholder: "메모 (선택)", maxlength: 300 });
-  const ePhotos = photoPicker();
+  const eRead = h("div", { class: "read-status", hidden: true });
+  let lastPhoto = null;
+  const eReadBtn = h("button", { type: "button", class: "secondary small", hidden: true }, "📄 사진에서 다시 읽기");
+
+  /** Reads the receipt and fills the form; the person checks it before saving. */
+  const readReceipt = async (file, overwrite) => {
+    lastPhoto = file;
+    eReadBtn.hidden = false;
+    eRead.hidden = false;
+    eRead.className = "read-status";
+    eRead.textContent = "📄 영수증을 읽는 중… (몇 초 걸립니다)";
+    try {
+      const r = await postImage("/api/receipts/read", await shrinkPhoto(file), "영수증을 읽지 못했습니다");
+      const put = (el, v) => { if (v !== null && v !== undefined && v !== "" && (overwrite || !el.value.trim())) el.value = v; };
+      put(eVendor, r.vendor);
+      if (r.date) eDate.value = r.date;
+      put(eAmount, r.total_cents === null ? null : (r.total_cents / 100).toFixed(2));
+      put(eGst, r.gst_cents === null ? null : (r.gst_cents / 100).toFixed(2));
+      if (r.items.length) put(eNote, r.items.slice(0, 3).map((i) => i.name).join(", ") + (r.items.length > 3 ? ` 외 ${r.items.length - 3}개` : ""));
+      const found = [r.vendor, r.date, r.total_cents !== null ? money(r.total_cents) : null, r.gst_cents !== null ? `GST ${money(r.gst_cents)}` : null].filter(Boolean);
+      eRead.className = r.total_cents === null ? "read-status warn" : "read-status ok";
+      eRead.textContent = (r.total_cents === null ? "⚠️ 합계를 읽지 못했습니다. 금액을 직접 입력하세요." : `✅ 읽었습니다: ${found.join(" · ")} — 맞는지 확인하고 저장하세요.`)
+        + (r.warnings.length ? `\n(${r.warnings.join(" / ")})` : "");
+    } catch (err) {
+      eRead.className = "read-status warn";
+      eRead.textContent = `⚠️ ${err.message}`;
+    }
+  };
+  const ePhotos = photoPicker({ onAdd: (added) => { if (!eAmount.value.trim()) act(null, () => readReceipt(added[0], false)); } });
+  eReadBtn.onclick = () => lastPhoto && act(eReadBtn, () => readReceipt(lastPhoto, true));
   const eSave = h("button", { type: "button" }, "지출 저장");
   let clientKey = crypto.randomUUID();
   let sentSig = null;
@@ -859,10 +895,12 @@ function expenseEntryCard(depts, cats) {
     act(eSave, async () => {
       if (!eAmount.value.trim()) {
         eAmount.focus();
-        throw new Error("금액을 입력하세요. (사진에서 금액을 자동으로 읽는 기능은 다음 단계에서 추가됩니다)");
+        throw new Error("금액을 입력하세요. (영수증 사진을 붙이면 자동으로 읽어 채웁니다)");
       }
       const cents = toCents(eAmount.value);
       if (cents === null || cents <= 0) throw new Error("금액이 올바르지 않습니다. (예: 45.50)");
+      const gst = eGst.value.trim() ? toCents(eGst.value) : null;
+      if (eGst.value.trim() && (gst === null || gst < 0 || gst > cents)) throw new Error("GST가 올바르지 않습니다. (합계보다 클 수 없습니다)");
       if (!eVendor.value.trim()) throw new Error("지급처 / 내용을 입력하세요.");
       const photos = ePhotos.files();
       const withPhotos = photos.length ? `\n영수증 사진 ${photos.length}장도 함께 올립니다.` : "";
@@ -870,6 +908,7 @@ function expenseEntryCard(depts, cats) {
       const body = {
         expense_date: eDate.value, vendor: eVendor.value, total_cents: cents, account: eAccount.value,
         department_id: eDept.value ? Number(eDept.value) : null, category_id: eCat.value ? Number(eCat.value) : null, note: eNote.value || undefined,
+        ...(gst !== null ? { gst_cents: gst } : {}),
       };
       // A resend of the same form (after a dropped reply) is not saved twice; a changed form gets a new key.
       const sig = JSON.stringify(body);
@@ -878,8 +917,10 @@ function expenseEntryCard(depts, cats) {
       const saved = await api("POST", "/api/expenses", { ...body, client_key: clientKey });
       clientKey = crypto.randomUUID();
       sentSig = null;
-      eVendor.value = eAmount.value = eNote.value = "";
+      eVendor.value = eAmount.value = eNote.value = eGst.value = "";
       ePhotos.clear();
+      eRead.hidden = eReadBtn.hidden = true;
+      lastPhoto = null;
       if (photos.length) {
         const r = await uploadPhotos(saved.id, photos);
         if (r.error) {
@@ -892,10 +933,13 @@ function expenseEntryCard(depts, cats) {
   return h("div", { class: "card" },
     h("h3", {}, "지출 입력"),
     h("div", { class: "grid" },
+      // Start with the receipt: its photo fills in the rest.
+      ePhotos.el, eRead, eReadBtn,
       h("div", { class: "row" }, h("div", {}, h("label", {}, "날짜"), eDate), h("div", {}, h("label", {}, "금액 ($)"), eAmount), h("div", {}, h("label", {}, "계정"), eAccount)),
       h("div", {}, h("label", {}, "지급처 / 내용"), eVendor),
-      h("div", { class: "row" }, eDept, eCat), eNote, ePhotos.el, eSave),
-    h("p", { class: "muted mt" }, "영수증 사진은 원본 대신 읽기 좋은 크기로 줄여서 올립니다. 사진 속 글자를 읽어 자동으로 채우는 기능은 다음 단계에서 추가됩니다."));
+      h("div", { class: "row" }, h("div", {}, h("label", {}, "GST ($, 선택)"), eGst), h("div", {}, h("label", {}, "메모"), eNote)),
+      h("div", { class: "row" }, eDept, eCat), eSave),
+    h("p", { class: "muted mt" }, "영수증 사진을 붙이면 Google Gemini가 가게·날짜·합계·GST를 읽어 칸을 채웁니다. 저장하기 전에 꼭 확인하세요. 사진은 읽기 좋은 크기로 줄여서 올립니다."));
 }
 
 function recurringCard(depts, cats, afterChange) {

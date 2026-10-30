@@ -3,6 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { accessVerifier, authenticate, guardRegistryReads, guardWrites, pastorOnly } from "./auth";
 import { expenseRoutes, recurringRoutes } from "./routes/expenses";
 import { lookupRoutes } from "./routes/lookups";
+import { geminiReader, type ReceiptReader } from "./ocr";
 import { attachmentRoutes } from "./routes/attachments";
 import { auditRoutes, meRoutes, settingsRoutes, userRoutes } from "./routes/misc";
 import { memberRoutes } from "./routes/members";
@@ -13,8 +14,11 @@ import { reportRoutes } from "./routes/reports";
 import { syncRoutes } from "./routes/sync";
 import type { AppEnv, TokenVerifier } from "./types";
 
-/** `verify` is injectable so tests can stand in for Cloudflare Access; production uses the default. */
-export function createApp(verify: TokenVerifier = accessVerifier) {
+/**
+ * `verify` and `readReceipt` are injectable so tests can stand in for Cloudflare Access and the
+ * receipt reader; production uses the defaults.
+ */
+export function createApp(verify: TokenVerifier = accessVerifier, readReceipt: ReceiptReader = geminiReader()) {
   const app = new Hono<AppEnv>();
 
   // API responses are data only: never framed, never sniffed, never cached by shared caches.
@@ -53,7 +57,7 @@ export function createApp(verify: TokenVerifier = accessVerifier) {
   app.route("/api/expenses", expenseRoutes);
   app.route("/api/recurring-expenses", recurringRoutes);
   app.route("/api/reports", reportRoutes);
-  app.route("/api", attachmentRoutes);
+  app.route("/api", attachmentRoutes(readReceipt));
 
   app.notFound((c) => c.json({ error: "찾을 수 없습니다." }, 404));
   app.onError((err, c) => {

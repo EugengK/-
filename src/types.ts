@@ -19,6 +19,10 @@ export interface Env {
   DEV_AUTH_EMAIL?: string;
   /** Shared secret the pastor's sheet script sends to /api/registry/sync (wrangler secret). */
   SYNC_TOKEN?: string;
+  /** Receipt auto-read (Google Gemini, paid tier). Secret: wrangler secret put GEMINI_API_KEY */
+  GEMINI_API_KEY?: string;
+  /** Gemini model id, e.g. "gemini-3.5-flash" (wrangler.jsonc vars). */
+  GEMINI_MODEL?: string;
 }
 
 export type AppEnv = { Bindings: Env; Variables: { user: AppUser } };

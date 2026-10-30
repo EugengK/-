@@ -110,3 +110,6 @@ input[type="date"] { -webkit-appearance: none; appearance: none; min-width: 0; d
 input[type="date"]::-webkit-date-and-time-value { text-align: left; }
 .list li .change { font-size: 14px; margin-top: 2px; }
 .list li .why { font-size: 14px; margin-top: 2px; color: var(--brand); }
+.read-status { white-space: pre-line; font-size: 14px; padding: 8px 10px; border-radius: 8px; background: var(--brand-soft); color: var(--brand); }
+.read-status.ok { background: #e7f5ec; color: var(--ok); }
+.read-status.warn { background: #fff7e6; color: #8a5a00; }

@@ -23,6 +23,7 @@ Cloudflare Workers + D1 기반 백엔드. 현재 구현: DB 구조, 로그인·�
 | `GET /api/offerings/summary` | 종류별·현금/온라인별 합계 (`member_id`로 개인별 합계) | - |
 | `/api/expenses`, `/api/recurring-expenses` | 지출 (입력·수정·지급·취소), 고정 지출(사례비·렌트 등)과 이번 주 알림 | 기록 담당 |
 | `POST /api/expenses/:id/attachments` (이미지 본문), `GET /api/expenses/:id/attachments`, `GET /api/attachments/:id`, `POST /api/attachments/:id/void` | 영수증 사진 (R2 `church-receipts`에 저장, 지출 하나에 10장·장당 10MB까지, JPEG·PNG·WEBP만, 지우기 대신 사유와 함께 취소) | 기록 담당 |
+| `POST /api/receipts/read` (이미지 본문) | 영수증 자동 읽기: 가게·날짜·합계·GST·품목을 돌려줌(저장하지 않음). Google Gemini(유료 등급), 모델은 `wrangler.jsonc`의 `GEMINI_MODEL`, 키는 비밀값 `GEMINI_API_KEY` | 기록 담당 |
 | `GET /api/reports/summary?from=&to=` | 기간 보고: 현금/은행 기간 시작·끝 잔액, 수입(헌금 종류별), 지출(부서별·항목별), 미지급 고정 지출 | - |
 | `GET /api/reports/{offerings,expenses,summary}.csv?from=&to=` | 같은 기간의 헌금 내역·지출 내역·요약을 CSV로 (엑셀·넘버스·구글 시트) | - |
 | `GET /api/audit-log` | 변경 기록 (누가·언제·무엇을, 이전/이후 값) | - |
